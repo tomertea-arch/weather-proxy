@@ -3,7 +3,7 @@ FastAPI Proxy Microservice with Redis caching
 Optimized for AWS Fargate deployment
 """
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import httpx
 import redis
 import os
@@ -19,6 +19,14 @@ from tenacity import (
     retry_if_exception_type,
     before_sleep_log,
     after_log
+)
+from prometheus_client import (
+    Counter,
+    Histogram,
+    Gauge,
+    generate_latest,
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry
 )
 
 # Configure logging to file and console
@@ -93,6 +101,67 @@ except Exception as e:
 # HTTP client for proxying requests
 http_client = httpx.AsyncClient(timeout=30.0)
 
+# Prometheus metrics
+prometheus_registry = CollectorRegistry()
+
+# Request count by endpoint and method
+request_count = Counter(
+    'weather_proxy_requests_total',
+    'Total number of requests',
+    ['endpoint', 'method', 'status'],
+    registry=prometheus_registry
+)
+
+# Request latency histogram
+request_latency = Histogram(
+    'weather_proxy_request_duration_seconds',
+    'Request latency in seconds',
+    ['endpoint', 'method'],
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0),
+    registry=prometheus_registry
+)
+
+# Upstream status codes
+upstream_status_count = Counter(
+    'weather_proxy_upstream_status_total',
+    'Upstream response status codes',
+    ['service', 'status_code'],
+    registry=prometheus_registry
+)
+
+# Error count
+error_count = Counter(
+    'weather_proxy_errors_total',
+    'Total number of errors',
+    ['endpoint', 'error_type'],
+    registry=prometheus_registry
+)
+
+# Redis connection status
+redis_status = Gauge(
+    'weather_proxy_redis_connected',
+    'Redis connection status (1=connected, 0=disconnected)',
+    registry=prometheus_registry
+)
+
+# Cache hit/miss counter
+cache_operations = Counter(
+    'weather_proxy_cache_operations_total',
+    'Cache operations',
+    ['operation', 'result'],
+    registry=prometheus_registry
+)
+
+# Update Redis status
+if redis_client:
+    try:
+        redis_client.ping()
+        redis_status.set(1)
+    except:
+        redis_status.set(0)
+else:
+    redis_status.set(0)
+
 # Metrics tracking
 class Metrics:
     """Simple in-memory metrics tracking"""
@@ -147,9 +216,30 @@ class Metrics:
 metrics = Metrics()
 
 
+@app.get("/metrics")
+async def prometheus_metrics():
+    """
+    Prometheus metrics endpoint.
+    Returns metrics in Prometheus exposition format.
+    """
+    # Update Redis connection status
+    if redis_client:
+        try:
+            redis_client.ping()
+            redis_status.set(1)
+        except:
+            redis_status.set(0)
+    
+    # Generate Prometheus metrics
+    metrics_output = generate_latest(prometheus_registry)
+    return Response(content=metrics_output, media_type=CONTENT_TYPE_LATEST)
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint for Fargate - returns service health, metrics, and Redis status"""
+    start_time = time.time()
+    
     # Track this request
     metrics.increment_request("/health")
     
@@ -197,14 +287,26 @@ async def health_check():
                 f"requests={stats['total_requests']}, errors={stats['total_errors']}, "
                 f"avg_duration={duration_stats['avg_ms']}ms, upstream_codes={stats['upstream_status_codes']}")
     
+    # Track in Prometheus
+    duration_ms = (time.time() - start_time) * 1000
+    request_latency.labels(endpoint='/health', method='GET').observe(duration_ms / 1000)
+    request_count.labels(endpoint='/health', method='GET', status='200').inc()
+    
     return health_status
 
 
 @app.get("/")
 async def root():
     """Root endpoint"""
+    start_time = time.time()
     metrics.increment_request("/")
     logger.info("Root endpoint accessed")
+    
+    # Track in Prometheus
+    duration_ms = (time.time() - start_time) * 1000
+    request_latency.labels(endpoint='/', method='GET').observe(duration_ms / 1000)
+    request_count.labels(endpoint='/', method='GET', status='200').inc()
+    
     return {
         "service": "weather-proxy",
         "status": "running",
@@ -247,6 +349,7 @@ async def fetch_weather_with_retry(city: str, cache_key: str, start_time: float)
         geocode_response.raise_for_status()
         geocode_status = geocode_response.status_code
         metrics.record_upstream_status(geocode_status)
+        upstream_status_count.labels(service='open-meteo-geocoding', status_code=str(geocode_status)).inc()
         logger.info(f"Geocoding API response: status={geocode_status}, attempt={attempt_num}")
         geocode_data = geocode_response.json()
         
@@ -276,6 +379,7 @@ async def fetch_weather_with_retry(city: str, cache_key: str, start_time: float)
         weather_response.raise_for_status()
         weather_status = weather_response.status_code
         metrics.record_upstream_status(weather_status)
+        upstream_status_count.labels(service='open-meteo-weather', status_code=str(weather_status)).inc()
         logger.info(f"Weather API response: status={weather_status}, attempt={attempt_num}")
         weather_data = weather_response.json()
         
@@ -341,11 +445,20 @@ async def get_weather(city: str):
                 duration_ms = (time.time() - start_time) * 1000
                 metrics.record_duration(duration_ms)
                 logger.info(f"Cache hit for city: {city}, duration={duration_ms:.2f}ms")
+                
+                # Track Prometheus metrics
+                cache_operations.labels(operation='get', result='hit').inc()
+                request_latency.labels(endpoint='/weather', method='GET').observe(duration_ms / 1000)
+                request_count.labels(endpoint='/weather', method='GET', status='200').inc()
+                
                 weather_result = json.loads(cached_weather)
                 weather_result["cached"] = True
                 return weather_result
+            else:
+                cache_operations.labels(operation='get', result='miss').inc()
         except Exception as e:
             logger.warning(f"Cache read error: {e}")
+            cache_operations.labels(operation='get', result='error').inc()
     
     # Fetch fresh data from Open-Meteo with retry mechanism
     try:
@@ -356,6 +469,10 @@ async def get_weather(city: str):
         metrics.record_duration(duration_ms)
         logger.info(f"Weather request completed: city={city}, duration={duration_ms:.2f}ms, cached=False")
         
+        # Track Prometheus metrics
+        request_latency.labels(endpoint='/weather', method='GET').observe(duration_ms / 1000)
+        request_count.labels(endpoint='/weather', method='GET', status='200').inc()
+        
         # Add cached flag for fresh data
         result["cached"] = False
         return result
@@ -365,6 +482,12 @@ async def get_weather(city: str):
         metrics.record_duration(duration_ms)
         metrics.increment_error()
         metrics.record_upstream_status(e.response.status_code)
+        
+        # Track Prometheus metrics
+        request_latency.labels(endpoint='/weather', method='GET').observe(duration_ms / 1000)
+        request_count.labels(endpoint='/weather', method='GET', status=str(e.response.status_code)).inc()
+        error_count.labels(endpoint='/weather', error_type='http_error').inc()
+        
         logger.error(f"HTTP error fetching weather: status={e.response.status_code}, error={e}, duration={duration_ms:.2f}ms")
         raise HTTPException(
             status_code=e.response.status_code,
@@ -374,20 +497,38 @@ async def get_weather(city: str):
         duration_ms = (time.time() - start_time) * 1000
         metrics.record_duration(duration_ms)
         metrics.increment_error()
+        
+        # Track Prometheus metrics
+        request_latency.labels(endpoint='/weather', method='GET').observe(duration_ms / 1000)
+        request_count.labels(endpoint='/weather', method='GET', status='502').inc()
+        error_count.labels(endpoint='/weather', error_type='request_error').inc()
+        
         logger.error(f"Request error fetching weather: error={e}, duration={duration_ms:.2f}ms")
         raise HTTPException(
             status_code=502,
             detail=f"Error connecting to weather service: {str(e)}"
         )
-    except HTTPException:
+    except HTTPException as e:
         duration_ms = (time.time() - start_time) * 1000
         metrics.record_duration(duration_ms)
         metrics.increment_error()
+        
+        # Track Prometheus metrics
+        request_latency.labels(endpoint='/weather', method='GET').observe(duration_ms / 1000)
+        request_count.labels(endpoint='/weather', method='GET', status=str(e.status_code)).inc()
+        error_count.labels(endpoint='/weather', error_type='http_exception').inc()
+        
         raise
     except Exception as e:
         duration_ms = (time.time() - start_time) * 1000
         metrics.record_duration(duration_ms)
         metrics.increment_error()
+        
+        # Track Prometheus metrics
+        request_latency.labels(endpoint='/weather', method='GET').observe(duration_ms / 1000)
+        request_count.labels(endpoint='/weather', method='GET', status='500').inc()
+        error_count.labels(endpoint='/weather', error_type='internal_error').inc()
+        
         logger.error(f"Unexpected error fetching weather: error={e}, duration={duration_ms:.2f}ms")
         raise HTTPException(
             status_code=500,

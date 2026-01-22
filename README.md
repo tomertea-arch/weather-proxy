@@ -54,6 +54,7 @@ docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/weather-proxy:latest
 ## API Endpoints
 
 - `GET /health` - Health check with metrics (service status, request count, error count, Redis status)
+- `GET /metrics` - **Prometheus metrics endpoint** (request latency, counts, cache operations, upstream status codes)
 - `GET /` - Service info
 - `GET /weather?city={city_name}` - Get weather data for a city (cached in Redis)
 - `GET /proxy/{path}?url=<target_url>` - Proxy GET request with caching
@@ -124,11 +125,48 @@ The weather endpoint implements an automatic retry mechanism with exponential ba
 
 This provides resilience against transient network issues and temporary API unavailability.
 
+## Prometheus Metrics Endpoint
+
+The `/metrics` endpoint exposes metrics in Prometheus format for monitoring and alerting:
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+### Available Metrics:
+
+**Request Metrics:**
+- `weather_proxy_requests_total` - Total requests by endpoint, method, and status
+- `weather_proxy_request_duration_seconds` - Request latency histogram (percentiles: p50, p95, p99)
+
+**Error Metrics:**
+- `weather_proxy_errors_total` - Total errors by endpoint and error type
+
+**Upstream Metrics:**
+- `weather_proxy_upstream_status_total` - Upstream service status codes (Open-Meteo API, etc.)
+
+**Cache Metrics:**
+- `weather_proxy_cache_operations_total` - Cache hit/miss/error counts
+- `weather_proxy_redis_connected` - Redis connection status (1=connected, 0=disconnected)
+
+Example Prometheus scrape config:
+```yaml
+scrape_configs:
+  - job_name: 'weather-proxy'
+    static_configs:
+      - targets: ['localhost:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+```
+
 ## Example Usage
 
 ```bash
 # Get weather for a city (will cache for 10 minutes)
 curl "http://localhost:8000/weather?city=London"
+
+# View Prometheus metrics
+curl "http://localhost:8000/metrics"
 
 # Proxy a GET request (cached)
 curl "http://localhost:8000/proxy/api?url=https://api.example.com/data"
