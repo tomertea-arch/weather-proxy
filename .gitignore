@@ -36,3 +36,8 @@ weather-proxy.log
 # OS
 .DS_Store
 Thumbs.db
+awscliv2.zip
+.gitignore
+aws/THIRD_PARTY_LICENSES
+aws/install
+AWS_DEPLOYMENT_SETUP.md
