@@ -51,6 +51,7 @@ docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/weather-proxy:latest
 
 - `GET /health` - Health check endpoint
 - `GET /` - Service info
+- `GET /weather?city={city_name}` - Get weather data for a city (cached in Redis)
 - `GET /proxy/{path}?url=<target_url>` - Proxy GET request with caching
 - `POST /proxy/{path}?url=<target_url>` - Proxy POST request
 - Other HTTP methods supported via `/proxy/{path}`
@@ -58,6 +59,9 @@ docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/weather-proxy:latest
 ## Example Usage
 
 ```bash
+# Get weather for a city (will cache for 10 minutes)
+curl "http://localhost:8000/weather?city=London"
+
 # Proxy a GET request (cached)
 curl "http://localhost:8000/proxy/api?url=https://api.example.com/data"
 
@@ -66,4 +70,39 @@ curl -X POST "http://localhost:8000/proxy/api?url=https://api.example.com/data" 
   -H "Content-Type: application/json" \
   -d '{"key": "value"}'
 ```
-# weather-proxy
+
+## Running Tests
+
+Install test dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+Run all tests:
+```bash
+pytest
+```
+
+Run tests with verbose output:
+```bash
+pytest -v
+```
+
+Run a specific test file:
+```bash
+pytest test_main.py
+```
+
+Run a specific test:
+```bash
+pytest test_main.py::TestWeatherEndpoint::test_weather_fresh_data_no_cache
+```
+
+## Test Coverage
+
+The test suite includes:
+- Health check endpoint tests (with/without Redis)
+- Root endpoint tests
+- Weather endpoint tests (cached/fresh data, error handling)
+- Proxy endpoint tests (GET/POST, caching)
+- Error handling and edge cases

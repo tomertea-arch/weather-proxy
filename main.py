@@ -10,15 +10,50 @@ import os
 import json
 from typing import Optional
 import logging
+from logging.handlers import RotatingFileHandler
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging to file and console
+log_file = os.getenv("LOG_FILE", "weather-proxy.log")
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Create logger
 logger = logging.getLogger(__name__)
+logger.setLevel(getattr(logging, log_level, logging.INFO))
+
+# Create formatters
+file_formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+console_formatter = logging.Formatter(
+    '%(levelname)s - %(message)s'
+)
+
+# File handler with rotation (10MB max, 5 backup files)
+file_handler = RotatingFileHandler(
+    log_file,
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5
+)
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(file_formatter)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(console_formatter)
+
+# Add handlers to logger
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# Prevent duplicate logs
+logger.propagate = False
 
 # Initialize FastAPI app
 app = FastAPI(
     title="Weather Proxy Service",
-    description="Proxy microservice with Redis caching",
+    description="Proxy microservice with Redis caching and Open-Meteo weather API integration",
     version="1.0.0"
 )
 
@@ -80,6 +115,120 @@ async def root():
         "status": "running",
         "version": "1.0.0"
     }
+
+
+@app.get("/weather")
+async def get_weather(city: str):
+    """
+    Get weather data for a city.
+    Returns cached data from Redis if available, otherwise fetches from Open-Meteo API.
+    """
+    if not city:
+        raise HTTPException(status_code=400, detail="City parameter is required")
+    
+    # Normalize city name for cache key (lowercase, strip whitespace)
+    city_normalized = city.strip().lower()
+    cache_key = f"weather:{city_normalized}"
+    
+    # Check Redis cache first
+    if redis_client:
+        try:
+            cached_weather = redis_client.get(cache_key)
+            if cached_weather:
+                logger.info(f"Cache hit for city: {city}")
+                weather_result = json.loads(cached_weather)
+                weather_result["cached"] = True
+                return weather_result
+        except Exception as e:
+            logger.warning(f"Cache read error: {e}")
+    
+    # Fetch fresh data from Open-Meteo
+    try:
+        # Step 1: Geocode the city to get coordinates
+        geocode_url = "https://geocoding-api.open-meteo.com/v1/search"
+        geocode_params = {
+            "name": city,
+            "count": 1,
+            "language": "en",
+            "format": "json"
+        }
+        
+        logger.info(f"Fetching coordinates for city: {city}")
+        geocode_response = await http_client.get(geocode_url, params=geocode_params)
+        geocode_response.raise_for_status()
+        geocode_data = geocode_response.json()
+        
+        if not geocode_data.get("results") or len(geocode_data["results"]) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"City '{city}' not found"
+            )
+        
+        location = geocode_data["results"][0]
+        latitude = location["latitude"]
+        longitude = location["longitude"]
+        city_name = location.get("name", city)
+        country = location.get("country", "")
+        
+        # Step 2: Fetch weather data using coordinates
+        weather_url = "https://api.open-meteo.com/v1/forecast"
+        weather_params = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "current_weather": "true",
+            "timezone": "auto"
+        }
+        
+        logger.info(f"Fetching weather for {city_name} ({latitude}, {longitude})")
+        weather_response = await http_client.get(weather_url, params=weather_params)
+        weather_response.raise_for_status()
+        weather_data = weather_response.json()
+        
+        # Combine location and weather data
+        result = {
+            "city": city_name,
+            "country": country,
+            "coordinates": {
+                "latitude": latitude,
+                "longitude": longitude
+            },
+            "current_weather": weather_data.get("current_weather", {}),
+            "timezone": weather_data.get("timezone", "")
+        }
+        
+        # Cache the result in Redis (cache for 10 minutes = 600 seconds)
+        # Don't store "cached" field in cache
+        if redis_client:
+            try:
+                redis_client.setex(cache_key, 600, json.dumps(result))
+                logger.info(f"Cached weather data for city: {city}")
+            except Exception as e:
+                logger.warning(f"Cache write error: {e}")
+        
+        # Add cached flag for fresh data
+        result["cached"] = False
+        return result
+        
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching weather: {e}")
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"Error fetching weather data: {str(e)}"
+        )
+    except httpx.RequestError as e:
+        logger.error(f"Request error fetching weather: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Error connecting to weather service: {str(e)}"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error fetching weather: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal error: {str(e)}"
+        )
 
 
 @app.api_route("/proxy/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
