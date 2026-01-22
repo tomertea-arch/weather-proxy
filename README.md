@@ -13,6 +13,7 @@ A production-ready FastAPI-based proxy microservice with Redis caching, optimize
 - [API Endpoints](#api-endpoints)
 - [Docker Deployment](#docker-deployment)
 - [Kubernetes/Helm Deployment](#kuberneteshelm-deployment)
+- [CI/CD Pipeline](#cicd-pipeline)
 - [Testing](#testing)
 - [Monitoring & Observability](#monitoring--observability)
 - [Future Improvements](#future-improvements)
@@ -24,7 +25,6 @@ A production-ready FastAPI-based proxy microservice with Redis caching, optimize
 - ✅ **FastAPI Framework** - High-performance async API with automatic OpenAPI docs
 - ✅ **Redis Caching** - Response caching with configurable TTL (10 minutes for weather)
 - ✅ **Weather API Integration** - Open-Meteo API for weather data with geocoding
-- ✅ **Generic Proxy** - Proxy any HTTP request with caching for GET requests
 - ✅ **Prometheus Metrics** - `/metrics` endpoint in Prometheus format
 
 ### Reliability & Resilience
@@ -714,6 +714,61 @@ See [helm/HELM_DEPLOYMENT.md](helm/HELM_DEPLOYMENT.md) for comprehensive documen
 
 ---
 
+## CI/CD Pipeline
+
+This project includes a comprehensive GitHub Actions CI/CD pipeline that automatically:
+
+- ✅ **Runs code linters** (flake8, black, pylint)
+- ✅ **Executes the full test suite** (unit + integration tests)
+- ✅ **Builds Docker images** with multi-architecture support
+- ✅ **Scans for security vulnerabilities** using Trivy
+- ✅ **Pushes to Docker registries** (Docker Hub + GitHub Container Registry)
+
+### Pipeline Stages
+
+```
+lint → test → docker-build → [docker-push, security-scan]
+```
+
+### Quick Start
+
+The pipeline runs automatically on:
+- Push to `main` or `develop` branches
+- Pull requests to `main` or `develop` branches
+
+### Configuration
+
+**Required GitHub Secrets** (for Docker push):
+- `DOCKERHUB_USERNAME` - Your Docker Hub username
+- `DOCKERHUB_TOKEN` - Docker Hub access token
+
+### Local CI Simulation
+
+```bash
+# Run linting
+pip install flake8 black pylint
+flake8 . --exclude=venv,.venv,__pycache__
+black --check .
+
+# Run tests with coverage
+pytest -v --cov=main --cov-report=html
+
+# Build and test Docker image
+docker build -t weather-proxy:test .
+docker run -d --name test -p 8000:8000 weather-proxy:test
+curl http://localhost:8000/health
+docker stop test && docker rm test
+
+# Scan for vulnerabilities
+trivy image weather-proxy:test
+```
+
+### Documentation
+
+For comprehensive CI/CD documentation, see [CI_CD.md](CI_CD.md).
+
+---
+
 ## Testing
 
 ### Running Tests
@@ -1070,6 +1125,7 @@ async def subscribe(city: str, webhook_url: str):
 - **README.md** (this file) - Overview and setup
 - **DOCKER_COMPOSE_GUIDE.md** - Docker Compose detailed guide
 - **HELM_DEPLOYMENT.md** - Kubernetes/Helm deployment
+- **CI_CD.md** - CI/CD pipeline documentation
 - **INTEGRATION_TESTS.md** - Integration testing guide
 
 ### Technical Documentation
@@ -1107,6 +1163,10 @@ weather-proxy/
 ├── nginx.conf                       # Nginx configuration
 ├── env.example                      # Environment template
 │
+├── .github/                         # CI/CD configuration
+│   └── workflows/
+│       └── ci.yml                   # GitHub Actions pipeline
+│
 ├── helm/                            # Helm chart
 │   ├── weather-proxy/
 │   │   ├── Chart.yaml
@@ -1120,6 +1180,7 @@ weather-proxy/
 │
 └── docs/                            # Documentation
     ├── README.md                    # This file
+    ├── CI_CD.md                     # CI/CD pipeline guide
     ├── DOCKER_COMPOSE_GUIDE.md
     ├── EMBEDDED_REDIS.md
     ├── DOCKER_EMBEDDED_REDIS.md
