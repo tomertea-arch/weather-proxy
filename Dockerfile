@@ -7,16 +7,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies including Redis client libraries
+# Install system dependencies including Redis server and client
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     curl \
+    redis-server \
+    redis-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security (best practice for Fargate)
 RUN useradd -m -u 1000 appuser && \
-    mkdir -p /app && \
-    chown -R appuser:appuser /app
+    mkdir -p /app /data/redis && \
+    chown -R appuser:appuser /app /data/redis
 
 # Set working directory
 WORKDIR /app
@@ -31,6 +33,10 @@ RUN pip install --upgrade pip && \
 # Copy application code
 COPY . .
 
+# Copy entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 # Change ownership to non-root user
 RUN chown -R appuser:appuser /app
 
@@ -44,7 +50,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run FastAPI with uvicorn with graceful shutdown support
-# timeout-graceful-shutdown: Wait up to 10s for in-flight requests before shutdown
-# timeout-keep-alive: Keep idle connections alive for 5s
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "10", "--timeout-keep-alive", "5"]
+# Use entrypoint script to start Redis (if needed) and the application
+# The script will:
+# - Start embedded Redis if REDIS_HOST is not provided
+# - Start FastAPI with uvicorn with graceful shutdown support
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

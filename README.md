@@ -6,6 +6,7 @@ A FastAPI-based proxy microservice with Redis caching, optimized for AWS Fargate
 
 - FastAPI framework for high-performance async requests
 - Redis integration for response caching
+- **Embedded Redis server** - automatically starts if no external Redis is configured
 - Health check endpoint with metrics (request count, errors, duration, upstream status codes)
 - **Retry mechanism with exponential backoff** for weather API calls (up to 3 attempts)
 - **Graceful shutdown handling** with SIGTERM/SIGINT signal support
@@ -65,12 +66,33 @@ docker build -t weather-proxy:latest .
 
 ## Running Locally
 
+### With Embedded Redis (No External Redis Required)
+
+The Docker container includes an embedded Redis server that starts automatically if no external Redis is configured:
+
 ```bash
+# Run with embedded Redis (simplest option)
+docker run -p 8000:8000 weather-proxy:latest
+
+# The container will automatically:
+# 1. Detect no external Redis is configured
+# 2. Start an embedded Redis server
+# 3. Use it for caching
+```
+
+### With External Redis
+
+```bash
+# Run with external Redis
 docker run -p 8000:8000 \
   -e REDIS_HOST=your-redis-host \
   -e REDIS_PORT=6379 \
   weather-proxy:latest
 ```
+
+**How it works:**
+- If `REDIS_HOST` is **not set** or set to `localhost`/`127.0.0.1`: Embedded Redis starts automatically
+- If `REDIS_HOST` is **set** to an external host: Uses the external Redis server
 
 ## AWS Fargate Deployment
 
