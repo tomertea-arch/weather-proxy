@@ -176,12 +176,16 @@ Location: `.github/workflows/ci.yml`
 ```
 lint → test → docker-build → [docker-push, security-scan]
                               (main branch only)
+                                     ↓
+                              deploy-fargate
+                              (main branch only)
 ```
 
 ### Triggers
 
 - **Push**: `main`, `develop` branches
 - **Pull Request**: Targeting `main`, `develop` branches
+- **AWS Deployment**: Only on `main` branch pushes
 
 ---
 
@@ -193,6 +197,8 @@ Configure these in GitHub Settings → Secrets and variables → Actions:
 |--------|-------------|--------------|
 | `DOCKERHUB_USERNAME` | Docker Hub username | Docker push |
 | `DOCKERHUB_TOKEN` | Docker Hub access token | Docker push |
+| `AWS_ACCESS_KEY_ID` | AWS access key ID | AWS Fargate deployment |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret access key | AWS Fargate deployment |
 | `GITHUB_TOKEN` | Auto-provided by GitHub | GHCR push |
 
 ### Setting up Docker Hub Token
@@ -201,6 +207,16 @@ Configure these in GitHub Settings → Secrets and variables → Actions:
 2. Account Settings → Security → New Access Token
 3. Copy token and add to GitHub Secrets as `DOCKERHUB_TOKEN`
 4. Add your Docker Hub username as `DOCKERHUB_USERNAME`
+
+### Setting up AWS Credentials
+
+1. Create IAM user with programmatic access
+2. Attach policies:
+   - `AmazonEC2ContainerRegistryPowerUser`
+   - `AmazonECS_FullAccess`
+   - `AmazonElasticLoadBalancingReadOnly`
+3. Copy Access Key ID → Add as `AWS_ACCESS_KEY_ID` secret
+4. Copy Secret Access Key → Add as `AWS_SECRET_ACCESS_KEY` secret
 
 ---
 
@@ -323,13 +339,53 @@ act -s DOCKERHUB_USERNAME=myusername -s DOCKERHUB_TOKEN=mytoken
 
 ---
 
+### 6. **AWS Fargate Deployment** ☁️
+
+Automatically deploys to AWS Fargate on successful builds:
+
+- **ECR Push**: Builds and pushes image to Amazon ECR
+- **Task Definition Update**: Updates ECS task definition with new image
+- **Service Deployment**: Deploys to Fargate with zero-downtime
+- **Status Check**: Verifies deployment and reports load balancer URL
+
+**Trigger**: On push to `main` branch only (after docker-push succeeds)
+**Duration**: ~5-8 minutes
+**Requirements**:
+- `AWS_ACCESS_KEY_ID` secret
+- `AWS_SECRET_ACCESS_KEY` secret
+- Existing ECS cluster and service (see AWS_FARGATE_DEPLOYMENT.md)
+
+#### Running Deployment Manually
+
+```bash
+# Configure AWS CLI
+aws configure
+
+# Build and push to ECR
+aws ecr get-login-password --region us-east-1 | \
+  docker login --username AWS --password-stdin YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
+
+docker build -t weather-proxy:latest .
+docker tag weather-proxy:latest YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/weather-proxy:latest
+docker push YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/weather-proxy:latest
+
+# Update ECS service
+aws ecs update-service \
+  --cluster weather-proxy-cluster \
+  --service weather-proxy-service-alb \
+  --force-new-deployment
+```
+
+---
+
 ## Future Enhancements
 
 Potential improvements to the CI/CD pipeline:
 
-1. **Deployment Automation**
-   - Auto-deploy to AWS Fargate on successful main branch build
+1. **Environment-Specific Deployments**
    - Deploy to staging environment on PR
+   - Deploy to production on release tags
+   - Blue-green deployment strategy
 
 2. **Advanced Testing**
    - Performance/load testing with Locust or K6

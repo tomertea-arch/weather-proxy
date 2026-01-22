@@ -8,12 +8,14 @@ When you push code to GitHub, the CI/CD pipeline will **automatically**:
 3. Build Docker image
 4. Push to Docker Hub & GitHub Container Registry (on main branch)
 5. Scan for security vulnerabilities
+6. Deploy to AWS Fargate (on main branch)
 
 ## 📋 Prerequisites
 
 - GitHub repository created
 - Git configured locally
 - Docker Hub account (for pushing images)
+- AWS account with ECS/Fargate setup (for deployment, optional)
 
 ---
 
@@ -45,9 +47,9 @@ git push origin main
 
 ---
 
-## 🔐 Step 2: Configure Docker Hub Secrets (Optional but Recommended)
+## 🔐 Step 2: Configure Secrets
 
-For the pipeline to **push Docker images**, you need to add secrets to GitHub.
+For the pipeline to **push Docker images** and **deploy to AWS**, you need to add secrets to GitHub.
 
 ### 2.1 Create Docker Hub Access Token
 
@@ -58,25 +60,123 @@ For the pipeline to **push Docker images**, you need to add secrets to GitHub.
 5. Permissions: **Read, Write, Delete**
 6. Click **Generate** and **copy the token**
 
-### 2.2 Add Secrets to GitHub Repository
+### 2.2 Create AWS IAM User (Optional - for AWS deployment)
+
+1. Go to [AWS IAM Console](https://console.aws.amazon.com/iam/)
+2. Click **Users** → **Create user**
+3. Username: `github-actions-weather-proxy`
+4. Select **Programmatic access**
+5. Attach the following policies:
+   - `AmazonEC2ContainerRegistryPowerUser`
+   - `AmazonECS_FullAccess`
+   - `AmazonElasticLoadBalancingReadOnly`
+6. Click **Create user** and **copy the credentials**
+
+### 2.3 Add Secrets to GitHub Repository
 
 1. Go to your GitHub repository
 2. Click **Settings** → **Secrets and variables** → **Actions**
 3. Click **New repository secret**
 
-Add these two secrets:
+Add these secrets:
 
-| Name | Value | Example |
-|------|-------|---------|
-| `DOCKERHUB_USERNAME` | Your Docker Hub username | `tomertea` |
-| `DOCKERHUB_TOKEN` | The access token you generated | `dckr_pat_abc123...` |
+| Name | Value | Required For | Example |
+|------|-------|--------------|---------|
+| `DOCKERHUB_USERNAME` | Your Docker Hub username | Docker push | `tomertea` |
+| `DOCKERHUB_TOKEN` | The access token you generated | Docker push | `dckr_pat_abc123...` |
+| `AWS_ACCESS_KEY_ID` | AWS IAM user access key | AWS deployment | `AKIA...` |
+| `AWS_SECRET_ACCESS_KEY` | AWS IAM user secret key | AWS deployment | `wJalrXUtnFEMI/...` |
 
 **Screenshot locations:**
 - GitHub: `https://github.com/YOUR_USERNAME/weather-proxy/settings/secrets/actions`
 
+**Note:** AWS secrets are only required if you want automatic deployment to AWS Fargate. See [AWS_FARGATE_DEPLOYMENT.md](AWS_FARGATE_DEPLOYMENT.md) for infrastructure setup.
+
 ---
 
-## 👀 Step 3: View the Pipeline Running
+## ☁️ Step 3: Set Up AWS Fargate Infrastructure (Optional)
+
+If you want automatic deployment to AWS Fargate, you need to set up the infrastructure first.
+
+### 3.1 Prerequisites
+
+Before the CI/CD can deploy to AWS, you must manually create:
+- ECS Cluster: `weather-proxy-cluster`
+- ECS Service: `weather-proxy-service-alb`
+- ECR Repository: `weather-proxy`
+- Task Definition: `weather-proxy`
+- Application Load Balancer (recommended)
+
+### 3.2 Quick Setup Using AWS CLI
+
+```bash
+# Set your AWS region
+export AWS_REGION=us-east-1
+
+# Create ECR repository
+aws ecr create-repository \
+    --repository-name weather-proxy \
+    --region $AWS_REGION
+
+# Create ECS cluster
+aws ecs create-cluster \
+    --cluster-name weather-proxy-cluster \
+    --region $AWS_REGION
+
+# Follow the detailed guide for complete setup
+```
+
+### 3.3 Complete Setup Guide
+
+For detailed infrastructure setup, see:
+- **[AWS_FARGATE_DEPLOYMENT.md](AWS_FARGATE_DEPLOYMENT.md)** - Complete deployment guide
+  - Step-by-step AWS infrastructure setup
+  - Task definitions
+  - Load balancer configuration
+  - Monitoring and scaling
+
+**Important:** The CI/CD pipeline expects these resources to exist:
+- ECR repository: `weather-proxy`
+- ECS cluster: `weather-proxy-cluster`
+- ECS service: `weather-proxy-service-alb`
+- Task definition: `weather-proxy`
+
+You can customize these names by editing the `env` section in `.github/workflows/ci.yml`:
+
+```yaml
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: weather-proxy
+  ECS_CLUSTER: weather-proxy-cluster
+  ECS_SERVICE: weather-proxy-service-alb
+  CONTAINER_NAME: weather-proxy
+```
+
+### 3.4 Verify Infrastructure
+
+Before enabling CI/CD deployment, verify your infrastructure:
+
+```bash
+# Check ECR repository exists
+aws ecr describe-repositories --repository-names weather-proxy
+
+# Check ECS cluster exists
+aws ecs describe-clusters --clusters weather-proxy-cluster
+
+# Check ECS service exists
+aws ecs describe-services \
+  --cluster weather-proxy-cluster \
+  --services weather-proxy-service-alb
+
+# Check task definition exists
+aws ecs describe-task-definition --task-definition weather-proxy
+```
+
+All commands should return details without errors.
+
+---
+
+## 👀 Step 4: View the Pipeline Running
 
 ### From GitHub Web Interface
 
@@ -109,14 +209,19 @@ https://github.com/YOUR_USERNAME/weather-proxy/actions
 ┌────▼─────┐ ┌─▼───────────┐  │
 │Security  │ │Docker Push  │  │ (Only on main branch)
 │  Scan    │ │(Main only)  │  │
-└──────────┘ └─────────────┘  │
+└──────────┘ └──────┬──────┘  │
+                    │
+                ┌───▼────────────┐
+                │ Deploy Fargate │ (Only on main branch)
+                │  (AWS ECS)     │
+                └────────────────┘
 ```
 
-**Total Time: ~8-12 minutes**
+**Total Time: ~13-20 minutes (including AWS deployment)**
 
 ---
 
-## 🎬 Step 4: Verify Docker Image Was Built
+## 🎬 Step 5: Verify Docker Image Was Built
 
 ### Check GitHub Actions Logs
 
@@ -180,7 +285,61 @@ git push origin feature/my-feature
 
 ---
 
-## 📊 Step 5: Add Status Badge to README
+## ☁️ Step 6: Verify AWS Deployment (Optional)
+
+If you configured AWS secrets and infrastructure, verify the deployment:
+
+### From GitHub Actions
+
+1. Go to **Actions** tab
+2. Click on the latest workflow run (main branch)
+3. Expand **Deploy to AWS Fargate** job
+4. Look for: ✅ "Deploy Amazon ECS task definition"
+5. Check deployment status and Load Balancer URL
+
+### From AWS Console
+
+1. Go to [ECS Console](https://console.aws.amazon.com/ecs/)
+2. Click your cluster: `weather-proxy-cluster`
+3. Click service: `weather-proxy-service-alb`
+4. Verify:
+   - **Desired count** = **Running count**
+   - **Health status**: Healthy
+   - Latest deployment is **PRIMARY**
+
+### Test the Deployed Application
+
+```bash
+# Get Load Balancer DNS from AWS
+ALB_DNS=$(aws elbv2 describe-load-balancers \
+  --query "LoadBalancers[?contains(LoadBalancerName, 'weather-proxy')].DNSName" \
+  --output text)
+
+echo "Application URL: http://$ALB_DNS"
+
+# Test health endpoint
+curl http://$ALB_DNS/health
+
+# Test weather endpoint
+curl "http://$ALB_DNS/weather?city=London"
+```
+
+### View Deployment Logs
+
+```bash
+# View ECS service events
+aws ecs describe-services \
+  --cluster weather-proxy-cluster \
+  --services weather-proxy-service-alb \
+  --query "services[0].events[0:5]"
+
+# View container logs
+aws logs tail /ecs/weather-proxy --follow
+```
+
+---
+
+## 📊 Step 7: Add Status Badge to README
 
 Show the world your builds are passing! Add this to your README.md:
 
@@ -278,6 +437,62 @@ It will show:
 3. **Async issues:**
    - Some tests have known async mocking issues
    - These are pre-existing and acknowledged
+
+---
+
+### AWS Deployment Failing
+
+**Problem:** "Deploy to AWS Fargate" job fails
+
+**Solutions:**
+
+1. **Check AWS credentials:**
+   - Go to: `Settings` → `Secrets and variables` → `Actions`
+   - Verify `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` exist
+   - Test credentials locally:
+     ```bash
+     aws sts get-caller-identity
+     ```
+
+2. **Infrastructure doesn't exist:**
+   - Error: `ServiceNotFoundException` or `ClusterNotFoundException`
+   - Solution: Follow [AWS_FARGATE_DEPLOYMENT.md](AWS_FARGATE_DEPLOYMENT.md) to create infrastructure
+   - Required resources:
+     - ECR repository: `weather-proxy`
+     - ECS cluster: `weather-proxy-cluster`
+     - ECS service: `weather-proxy-service-alb`
+
+3. **IAM permissions insufficient:**
+   - Error: `AccessDeniedException`
+   - Solution: Attach required policies to IAM user:
+     - `AmazonEC2ContainerRegistryPowerUser`
+     - `AmazonECS_FullAccess`
+     - `AmazonElasticLoadBalancingReadOnly`
+
+4. **Task definition issues:**
+   - Error: Task definition download fails
+   - Solution: Ensure task definition `weather-proxy` exists:
+     ```bash
+     aws ecs describe-task-definition --task-definition weather-proxy
+     ```
+
+5. **Service update timeout:**
+   - Error: Deployment takes too long
+   - Check ECS service events for issues:
+     ```bash
+     aws ecs describe-services \
+       --cluster weather-proxy-cluster \
+       --services weather-proxy-service-alb
+     ```
+   - Common causes:
+     - Health checks failing
+     - Insufficient resources
+     - Security group misconfiguration
+
+6. **Skip AWS deployment temporarily:**
+   - If you want to disable AWS deployment while fixing issues
+   - Comment out the `deploy-fargate` job in `.github/workflows/ci.yml`
+   - Or remove AWS secrets to prevent the job from running
 
 ---
 
@@ -390,10 +605,12 @@ After setup, you should have:
 
 - [ ] CI/CD configuration pushed to GitHub
 - [ ] Actions tab shows successful workflow run
-- [ ] All 5 jobs completed: Lint, Test, Docker Build, Docker Push, Security Scan
+- [ ] All jobs completed: Lint, Test, Docker Build, Docker Push, Security Scan
 - [ ] Docker image visible in Docker Hub or GHCR
 - [ ] Status badge added to README
 - [ ] Team can see build status
+- [ ] (Optional) AWS Fargate deployment successful
+- [ ] (Optional) Application accessible via AWS Load Balancer
 
 ---
 
