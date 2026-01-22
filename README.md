@@ -12,6 +12,7 @@ A production-ready FastAPI-based proxy microservice with Redis caching, optimize
 - [Architectural Design Decisions](#architectural-design-decisions)
 - [API Endpoints](#api-endpoints)
 - [Docker Deployment](#docker-deployment)
+- [AWS Fargate Deployment](#aws-fargate-deployment)
 - [Kubernetes/Helm Deployment](#kuberneteshelm-deployment)
 - [CI/CD Pipeline](#cicd-pipeline)
 - [Testing](#testing)
@@ -691,6 +692,67 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ---
 
+## AWS Fargate Deployment
+
+Deploy to AWS Fargate for a fully managed, serverless container experience.
+
+### Quick Start
+
+```bash
+# 1. Install AWS CLI
+brew install awscli  # macOS
+# or
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip && sudo ./aws/install
+
+# 2. Configure credentials
+aws configure
+
+# 3. Push image to ECR
+aws ecr create-repository --repository-name weather-proxy --region us-east-1
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin YOUR_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com
+docker tag weather-proxy:latest YOUR_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/weather-proxy:latest
+docker push YOUR_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/weather-proxy:latest
+
+# 4. Deploy using ECS Console (easiest)
+# Go to: https://console.aws.amazon.com/ecs/
+# Click "Get Started" and follow the wizard
+
+# 5. Or deploy via CLI
+aws ecs create-cluster --cluster-name weather-proxy-cluster
+# ... (see full guide for detailed steps)
+```
+
+### Features
+
+- ✅ **Serverless** - No infrastructure management
+- ✅ **Auto-scaling** - Scale based on CPU/memory
+- ✅ **Load Balancing** - Application Load Balancer integration
+- ✅ **High Availability** - Multi-AZ deployment
+- ✅ **CloudWatch Integration** - Logs and metrics
+- ✅ **CI/CD Ready** - GitHub Actions workflow included
+
+### Architecture
+
+```
+Internet → ALB → Fargate Tasks (2-10) → ElastiCache Redis (optional)
+```
+
+### Cost Estimate
+
+~$52/month for production setup (2 tasks, ALB, monitoring)
+
+**Comprehensive Guide**: See [AWS_FARGATE_DEPLOYMENT.md](AWS_FARGATE_DEPLOYMENT.md) for:
+- Detailed CLI deployment steps
+- Task definition configuration
+- Load balancer setup
+- Auto-scaling configuration
+- CI/CD integration
+- Monitoring and troubleshooting
+- Cost optimization tips
+
+---
+
 ## Kubernetes/Helm Deployment
 
 ### Quick Install
@@ -1123,6 +1185,7 @@ async def subscribe(city: str, webhook_url: str):
 
 ### Main Documentation
 - **README.md** (this file) - Overview and setup
+- **AWS_FARGATE_DEPLOYMENT.md** - AWS Fargate deployment guide
 - **DOCKER_COMPOSE_GUIDE.md** - Docker Compose detailed guide
 - **HELM_DEPLOYMENT.md** - Kubernetes/Helm deployment
 - **CI_CD.md** - CI/CD pipeline documentation
