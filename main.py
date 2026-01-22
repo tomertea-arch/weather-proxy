@@ -84,25 +84,76 @@ except Exception as e:
 # HTTP client for proxying requests
 http_client = httpx.AsyncClient(timeout=30.0)
 
+# Metrics tracking
+class Metrics:
+    """Simple in-memory metrics tracking"""
+    def __init__(self):
+        self.request_count = 0
+        self.error_count = 0
+        self.requests_by_endpoint = {}
+    
+    def increment_request(self, endpoint: str = "unknown"):
+        self.request_count += 1
+        self.requests_by_endpoint[endpoint] = self.requests_by_endpoint.get(endpoint, 0) + 1
+    
+    def increment_error(self):
+        self.error_count += 1
+    
+    def get_stats(self):
+        return {
+            "total_requests": self.request_count,
+            "total_errors": self.error_count,
+            "requests_by_endpoint": self.requests_by_endpoint.copy()
+        }
+
+metrics = Metrics()
+
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for Fargate"""
+    """Health check endpoint for Fargate - returns service health, metrics, and Redis status"""
+    # Track this request
+    metrics.increment_request("/health")
+    
+    # Get metrics stats
+    stats = metrics.get_stats()
+    
     health_status = {
         "status": "healthy",
-        "service": "weather-proxy"
+        "service": "weather-proxy",
+        "metrics": {
+            "total_requests": stats["total_requests"],
+            "total_errors": stats["total_errors"],
+            "requests_by_endpoint": stats["requests_by_endpoint"]
+        }
     }
     
     # Check Redis connection
+    redis_status = "not_configured"
     if redis_client:
         try:
             redis_client.ping()
-            health_status["redis"] = "connected"
+            redis_status = "connected"
+            health_status["redis"] = {
+                "status": "connected",
+                "host": REDIS_HOST,
+                "port": REDIS_PORT
+            }
         except Exception as e:
-            health_status["redis"] = f"disconnected: {str(e)}"
+            redis_status = "disconnected"
+            health_status["redis"] = {
+                "status": "disconnected",
+                "error": str(e)
+            }
             health_status["status"] = "degraded"
     else:
-        health_status["redis"] = "not_configured"
+        health_status["redis"] = {
+            "status": "not_configured"
+        }
+    
+    # Log health check request
+    logger.info(f"Health check: status={health_status['status']}, redis={redis_status}, "
+                f"requests={stats['total_requests']}, errors={stats['total_errors']}")
     
     return health_status
 
@@ -110,6 +161,8 @@ async def health_check():
 @app.get("/")
 async def root():
     """Root endpoint"""
+    metrics.increment_request("/")
+    logger.info("Root endpoint accessed")
     return {
         "service": "weather-proxy",
         "status": "running",
@@ -123,7 +176,10 @@ async def get_weather(city: str):
     Get weather data for a city.
     Returns cached data from Redis if available, otherwise fetches from Open-Meteo API.
     """
+    metrics.increment_request("/weather")
+    
     if not city:
+        metrics.increment_error()
         raise HTTPException(status_code=400, detail="City parameter is required")
     
     # Normalize city name for cache key (lowercase, strip whitespace)
@@ -210,20 +266,24 @@ async def get_weather(city: str):
         return result
         
     except httpx.HTTPStatusError as e:
+        metrics.increment_error()
         logger.error(f"HTTP error fetching weather: {e}")
         raise HTTPException(
             status_code=e.response.status_code,
             detail=f"Error fetching weather data: {str(e)}"
         )
     except httpx.RequestError as e:
+        metrics.increment_error()
         logger.error(f"Request error fetching weather: {e}")
         raise HTTPException(
             status_code=502,
             detail=f"Error connecting to weather service: {str(e)}"
         )
     except HTTPException:
+        metrics.increment_error()
         raise
     except Exception as e:
+        metrics.increment_error()
         logger.error(f"Unexpected error fetching weather: {e}")
         raise HTTPException(
             status_code=500,
@@ -236,9 +296,12 @@ async def proxy_request(path: str, request: Request):
     """
     Proxy endpoint that caches GET requests in Redis
     """
+    metrics.increment_request(f"/proxy/{request.method}")
+    
     # Get target URL from query parameter or header
     target_url = request.query_params.get("url")
     if not target_url:
+        metrics.increment_error()
         raise HTTPException(status_code=400, detail="Missing 'url' query parameter")
     
     # Build full URL
@@ -305,9 +368,11 @@ async def proxy_request(path: str, request: Request):
         )
         
     except httpx.RequestError as e:
+        metrics.increment_error()
         logger.error(f"Proxy request error: {e}")
         raise HTTPException(status_code=502, detail=f"Proxy error: {str(e)}")
     except Exception as e:
+        metrics.increment_error()
         logger.error(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 

@@ -16,6 +16,8 @@ A FastAPI-based proxy microservice with Redis caching, optimized for AWS Fargate
 - `REDIS_PORT`: Redis server port (default: 6379)
 - `REDIS_DB`: Redis database number (default: 0)
 - `REDIS_PASSWORD`: Redis password (optional)
+- `LOG_FILE`: Log file path (default: weather-proxy.log)
+- `LOG_LEVEL`: Logging level - DEBUG, INFO, WARNING, ERROR (default: INFO)
 
 ## Building the Docker Image
 
@@ -49,12 +51,35 @@ docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/weather-proxy:latest
 
 ## API Endpoints
 
-- `GET /health` - Health check endpoint
+- `GET /health` - Health check with metrics (service status, request count, error count, Redis status)
 - `GET /` - Service info
 - `GET /weather?city={city_name}` - Get weather data for a city (cached in Redis)
 - `GET /proxy/{path}?url=<target_url>` - Proxy GET request with caching
 - `POST /proxy/{path}?url=<target_url>` - Proxy POST request
 - Other HTTP methods supported via `/proxy/{path}`
+
+### Health Endpoint Response
+
+```json
+{
+  "status": "healthy",
+  "service": "weather-proxy",
+  "metrics": {
+    "total_requests": 150,
+    "total_errors": 2,
+    "requests_by_endpoint": {
+      "/health": 10,
+      "/weather": 100,
+      "/proxy/GET": 40
+    }
+  },
+  "redis": {
+    "status": "connected",
+    "host": "localhost",
+    "port": 6379
+  }
+}
+```
 
 ## Example Usage
 
