@@ -12,6 +12,14 @@ import time
 from typing import Optional
 import logging
 from logging.handlers import RotatingFileHandler
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+    after_log
+)
 
 # Configure logging to file and console
 log_file = os.getenv("LOG_FILE", "weather-proxy.log")
@@ -204,11 +212,115 @@ async def root():
     }
 
 
+async def fetch_weather_with_retry(city: str, cache_key: str, start_time: float):
+    """
+    Fetch weather data with retry mechanism for resilience.
+    Uses exponential backoff retry on transient errors.
+    """
+    retry_count = {"attempts": 0}
+    
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
+    async def _fetch_with_retry():
+        retry_count["attempts"] += 1
+        attempt_num = retry_count["attempts"]
+        
+        if attempt_num > 1:
+            logger.warning(f"Retry attempt {attempt_num} for city: {city}")
+        
+        # Step 1: Geocode the city to get coordinates
+        geocode_url = "https://geocoding-api.open-meteo.com/v1/search"
+        geocode_params = {
+            "name": city,
+            "count": 1,
+            "language": "en",
+            "format": "json"
+        }
+        
+        logger.info(f"Fetching coordinates for city: {city} (attempt {attempt_num})")
+        geocode_response = await http_client.get(geocode_url, params=geocode_params)
+        geocode_response.raise_for_status()
+        geocode_status = geocode_response.status_code
+        metrics.record_upstream_status(geocode_status)
+        logger.info(f"Geocoding API response: status={geocode_status}, attempt={attempt_num}")
+        geocode_data = geocode_response.json()
+        
+        if not geocode_data.get("results") or len(geocode_data["results"]) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"City '{city}' not found"
+            )
+        
+        location = geocode_data["results"][0]
+        latitude = location["latitude"]
+        longitude = location["longitude"]
+        city_name = location.get("name", city)
+        country = location.get("country", "")
+        
+        # Step 2: Fetch weather data using coordinates
+        weather_url = "https://api.open-meteo.com/v1/forecast"
+        weather_params = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "current_weather": "true",
+            "timezone": "auto"
+        }
+        
+        logger.info(f"Fetching weather for {city_name} ({latitude}, {longitude}) (attempt {attempt_num})")
+        weather_response = await http_client.get(weather_url, params=weather_params)
+        weather_response.raise_for_status()
+        weather_status = weather_response.status_code
+        metrics.record_upstream_status(weather_status)
+        logger.info(f"Weather API response: status={weather_status}, attempt={attempt_num}")
+        weather_data = weather_response.json()
+        
+        # Combine location and weather data
+        result = {
+            "city": city_name,
+            "country": country,
+            "coordinates": {
+                "latitude": latitude,
+                "longitude": longitude
+            },
+            "current_weather": weather_data.get("current_weather", {}),
+            "timezone": weather_data.get("timezone", "")
+        }
+        
+        return result
+    
+    try:
+        result = await _fetch_with_retry()
+        
+        # Cache the result in Redis (cache for 10 minutes = 600 seconds)
+        if redis_client:
+            try:
+                redis_client.setex(cache_key, 600, json.dumps(result))
+                logger.info(f"Cached weather data for city: {city}")
+            except Exception as e:
+                logger.warning(f"Cache write error: {e}")
+        
+        # Log successful completion with retry count
+        if retry_count["attempts"] > 1:
+            logger.info(f"Weather fetch succeeded after {retry_count['attempts']} attempts for city: {city}")
+        
+        return result
+    
+    except Exception as e:
+        logger.error(f"Weather fetch failed after {retry_count['attempts']} attempts for city: {city}, error={e}")
+        raise
+
+
 @app.get("/weather")
 async def get_weather(city: str):
     """
     Get weather data for a city.
     Returns cached data from Redis if available, otherwise fetches from Open-Meteo API.
+    Implements retry mechanism with exponential backoff for transient failures.
     """
     start_time = time.time()
     metrics.increment_request("/weather")
@@ -235,74 +347,9 @@ async def get_weather(city: str):
         except Exception as e:
             logger.warning(f"Cache read error: {e}")
     
-    # Fetch fresh data from Open-Meteo
+    # Fetch fresh data from Open-Meteo with retry mechanism
     try:
-        # Step 1: Geocode the city to get coordinates
-        geocode_url = "https://geocoding-api.open-meteo.com/v1/search"
-        geocode_params = {
-            "name": city,
-            "count": 1,
-            "language": "en",
-            "format": "json"
-        }
-        
-        logger.info(f"Fetching coordinates for city: {city}")
-        geocode_response = await http_client.get(geocode_url, params=geocode_params)
-        geocode_response.raise_for_status()
-        geocode_status = geocode_response.status_code
-        metrics.record_upstream_status(geocode_status)
-        logger.info(f"Geocoding API response: status={geocode_status}")
-        geocode_data = geocode_response.json()
-        
-        if not geocode_data.get("results") or len(geocode_data["results"]) == 0:
-            raise HTTPException(
-                status_code=404,
-                detail=f"City '{city}' not found"
-            )
-        
-        location = geocode_data["results"][0]
-        latitude = location["latitude"]
-        longitude = location["longitude"]
-        city_name = location.get("name", city)
-        country = location.get("country", "")
-        
-        # Step 2: Fetch weather data using coordinates
-        weather_url = "https://api.open-meteo.com/v1/forecast"
-        weather_params = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "current_weather": "true",
-            "timezone": "auto"
-        }
-        
-        logger.info(f"Fetching weather for {city_name} ({latitude}, {longitude})")
-        weather_response = await http_client.get(weather_url, params=weather_params)
-        weather_response.raise_for_status()
-        weather_status = weather_response.status_code
-        metrics.record_upstream_status(weather_status)
-        logger.info(f"Weather API response: status={weather_status}")
-        weather_data = weather_response.json()
-        
-        # Combine location and weather data
-        result = {
-            "city": city_name,
-            "country": country,
-            "coordinates": {
-                "latitude": latitude,
-                "longitude": longitude
-            },
-            "current_weather": weather_data.get("current_weather", {}),
-            "timezone": weather_data.get("timezone", "")
-        }
-        
-        # Cache the result in Redis (cache for 10 minutes = 600 seconds)
-        # Don't store "cached" field in cache
-        if redis_client:
-            try:
-                redis_client.setex(cache_key, 600, json.dumps(result))
-                logger.info(f"Cached weather data for city: {city}")
-            except Exception as e:
-                logger.warning(f"Cache write error: {e}")
+        result = await fetch_weather_with_retry(city, cache_key, start_time)
         
         # Record request duration
         duration_ms = (time.time() - start_time) * 1000
