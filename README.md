@@ -94,6 +94,68 @@ docker run -p 8000:8000 \
 - If `REDIS_HOST` is **not set** or set to `localhost`/`127.0.0.1`: Embedded Redis starts automatically
 - If `REDIS_HOST` is **set** to an external host: Uses the external Redis server
 
+## Docker Compose
+
+### Quick Start with Docker Compose
+
+The easiest way to run the complete application:
+
+```bash
+# Start with embedded Redis (simplest)
+docker-compose up
+
+# Or in detached mode
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop
+docker-compose down
+```
+
+### Available Configurations
+
+We provide 4 Docker Compose configurations:
+
+| File | Use Case | Redis | Command |
+|------|----------|-------|---------|
+| `docker-compose.yml` | Default - Embedded Redis | Embedded | `docker-compose up` |
+| `docker-compose.dev.yml` | Development with debug logs | Embedded | `docker-compose -f docker-compose.dev.yml up` |
+| `docker-compose.external-redis.yml` | With external Redis service | External | `docker-compose -f docker-compose.external-redis.yml up` |
+| `docker-compose.prod.yml` | Production with HA | External + HA | `docker-compose -f docker-compose.prod.yml up -d` |
+
+### Examples
+
+#### Development Mode
+```bash
+# Start in development mode with debug logging
+docker-compose -f docker-compose.dev.yml up
+```
+
+#### With External Redis
+```bash
+# Start with separate Redis container
+docker-compose -f docker-compose.external-redis.yml up -d
+
+# Check Redis
+docker-compose -f docker-compose.external-redis.yml exec redis redis-cli ping
+```
+
+#### Production Mode
+```bash
+# Set Redis password
+export REDIS_PASSWORD="your-secure-password"
+
+# Start production stack with HA
+docker-compose -f docker-compose.prod.yml up -d
+
+# Scale application
+docker-compose -f docker-compose.prod.yml up -d --scale weather-proxy=3
+```
+
+For detailed Docker Compose usage, see [DOCKER_COMPOSE_GUIDE.md](DOCKER_COMPOSE_GUIDE.md)
+
 ## AWS Fargate Deployment
 
 1. Build and push to ECR:

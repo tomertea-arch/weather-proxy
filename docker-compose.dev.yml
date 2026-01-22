@@ -1,0 +1,43 @@
+version: '3.8'
+
+# Docker Compose configuration for DEVELOPMENT
+# Features: Hot reload, debug mode, embedded Redis
+# Usage: docker-compose -f docker-compose.dev.yml up
+
+services:
+  weather-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: weather-proxy-dev
+    ports:
+      - "8000:8000"
+    environment:
+      # Embedded Redis (no REDIS_HOST set)
+      LOG_LEVEL: DEBUG
+      LOG_FILE: weather-proxy.log
+    
+    volumes:
+      # Mount source code for hot reload (if uvicorn --reload is used)
+      - ./main.py:/app/main.py:ro
+      - ./requirements.txt:/app/requirements.txt:ro
+    
+    networks:
+      - weather-proxy-network
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    
+    # Override entrypoint for development with auto-reload
+    # entrypoint: ["/usr/local/bin/docker-entrypoint.sh"]
+    # command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+networks:
+  weather-proxy-network:
+    driver: bridge

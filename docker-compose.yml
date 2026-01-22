@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # Weather Proxy Application with Embedded Redis (Default)
+  weather-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: weather-proxy
+    ports:
+      - "8000:8000"
+    environment:
+      # Redis Configuration (embedded Redis will start if not set)
+      # REDIS_HOST: redis  # Uncomment to use external Redis service
+      # REDIS_PORT: 6379
+      # REDIS_DB: 0
+      # REDIS_PASSWORD: ""
+      
+      # Logging
+      LOG_LEVEL: INFO
+      LOG_FILE: weather-proxy.log
+    
+    # Uncomment to use external Redis
+    # depends_on:
+    #   - redis
+    
+    networks:
+      - weather-proxy-network
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # External Redis (Optional - use profile to enable)
+  redis:
+    image: redis:7-alpine
+    container_name: weather-proxy-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    networks:
+      - weather-proxy-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    profiles:
+      - external-redis
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  weather-proxy-network:
+    driver: bridge
