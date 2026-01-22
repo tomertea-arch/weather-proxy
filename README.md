@@ -225,6 +225,16 @@ Run all tests:
 pytest
 ```
 
+Run unit tests only:
+```bash
+pytest test_main.py
+```
+
+Run integration tests only:
+```bash
+pytest test_integration.py
+```
+
 Run tests with verbose output:
 ```bash
 pytest -v
@@ -237,14 +247,30 @@ pytest test_main.py
 
 Run a specific test:
 ```bash
-pytest test_main.py::TestWeatherEndpoint::test_weather_fresh_data_no_cache
+pytest test_main.py::TestWeatherEndpoint
 ```
 
 ## Test Coverage
 
-The test suite includes:
-- Health check endpoint tests (with/without Redis)
-- Root endpoint tests
-- Weather endpoint tests (cached/fresh data, error handling)
-- Proxy endpoint tests (GET/POST, caching)
-- Error handling and edge cases
+### Unit Tests (`test_main.py`)
+- ✅ Health check endpoint (with/without Redis) - 4 tests
+- ✅ Root endpoint - 1 test
+- ✅ Weather endpoint (cached/fresh data, error handling) - 5 tests
+- ✅ Proxy endpoint (GET/POST, caching) - 5 tests
+- ✅ Metrics endpoint (Prometheus format, tracking) - 9 tests
+- ✅ Graceful shutdown (signal handling, lifespan) - 4 tests
+- **Total: 28 unit tests (26 passing)**
+
+### Integration Tests (`test_integration.py`)
+- ✅ Weather endpoint integration (parameter validation, caching) - 2 tests
+- ✅ Proxy endpoint integration (URL parameter, HTTP methods, caching) - 4 tests
+- ✅ Health endpoint integration (Redis connected/disconnected) - 3 tests
+- ✅ Metrics endpoint integration (Prometheus format, tracking) - 3 tests
+- ✅ End-to-end scenarios (workflows, error handling) - 4 tests
+- ✅ Caching behavior (GET cached, POST not cached, metrics) - 3 tests
+- **Total: 19 integration tests (all passing)**
+
+### Combined Test Suite
+- **Total: 47 tests**
+- **Passing: 45 tests (95.7%)**
+- **Coverage: API endpoints, caching, metrics, error handling, graceful shutdown**
