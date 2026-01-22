@@ -44,5 +44,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run FastAPI with uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run FastAPI with uvicorn with graceful shutdown support
+# timeout-graceful-shutdown: Wait up to 10s for in-flight requests before shutdown
+# timeout-keep-alive: Keep idle connections alive for 5s
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "10", "--timeout-keep-alive", "5"]

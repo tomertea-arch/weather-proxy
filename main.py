@@ -9,7 +9,10 @@ import redis
 import os
 import json
 import time
+import signal
+import asyncio
 from typing import Optional
+from contextlib import asynccontextmanager
 import logging
 from logging.handlers import RotatingFileHandler
 from tenacity import (
@@ -67,11 +70,65 @@ logger.addHandler(console_handler)
 # Prevent duplicate logs
 logger.propagate = False
 
-# Initialize FastAPI app
+# Shutdown event for graceful shutdown
+shutdown_event = asyncio.Event()
+
+
+# Lifespan context manager for startup and shutdown
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Lifespan context manager for graceful startup and shutdown.
+    Handles resource initialization and cleanup.
+    """
+    # Startup
+    logger.info("Application starting up...")
+    
+    # Setup signal handlers for graceful shutdown
+    def handle_shutdown_signal(signum, frame):
+        """Handle SIGTERM and SIGINT signals"""
+        signal_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+        logger.info(f"Received {signal_name} signal, initiating graceful shutdown...")
+        shutdown_event.set()
+    
+    # Register signal handlers
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    logger.info("Signal handlers registered for SIGTERM and SIGINT")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Application shutting down gracefully...")
+    
+    # Wait a brief moment for in-flight requests to complete
+    logger.info("Waiting for in-flight requests to complete...")
+    await asyncio.sleep(2)  # Grace period for in-flight requests
+    
+    # Close HTTP client
+    try:
+        await http_client.aclose()
+        logger.info("HTTP client closed successfully")
+    except Exception as e:
+        logger.error(f"Error closing HTTP client: {e}")
+    
+    # Close Redis connection
+    if redis_client:
+        try:
+            redis_client.close()
+            logger.info("Redis client closed successfully")
+        except Exception as e:
+            logger.error(f"Error closing Redis client: {e}")
+    
+    logger.info("Shutdown complete")
+
+
+# Initialize FastAPI app with lifespan
 app = FastAPI(
     title="Weather Proxy Service",
     description="Proxy microservice with Redis caching and Open-Meteo weather API integration",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Redis connection configuration
@@ -639,14 +696,13 @@ async def proxy_request(path: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 
-@app.on_event("shutdown")
-async def shutdown():
-    """Cleanup on shutdown"""
-    await http_client.aclose()
-    if redis_client:
-        redis_client.close()
-
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+    # Configure uvicorn for graceful shutdown
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        timeout_graceful_shutdown=10  # Allow 10 seconds for graceful shutdown
+    )

@@ -8,7 +8,9 @@ A FastAPI-based proxy microservice with Redis caching, optimized for AWS Fargate
 - Redis integration for response caching
 - Health check endpoint with metrics (request count, errors, duration, upstream status codes)
 - **Retry mechanism with exponential backoff** for weather API calls (up to 3 attempts)
+- **Graceful shutdown handling** with SIGTERM/SIGINT signal support
 - Request duration and upstream status code logging
+- Prometheus-compatible `/metrics` endpoint for monitoring
 - Non-root user for enhanced security
 - Optimized Docker image for Fargate
 
@@ -20,6 +22,40 @@ A FastAPI-based proxy microservice with Redis caching, optimized for AWS Fargate
 - `REDIS_PASSWORD`: Redis password (optional)
 - `LOG_FILE`: Log file path (default: weather-proxy.log)
 - `LOG_LEVEL`: Logging level - DEBUG, INFO, WARNING, ERROR (default: INFO)
+
+## Graceful Shutdown
+
+The application implements proper graceful shutdown handling for containerized environments:
+
+### Signal Handling
+- **SIGTERM**: Sent by Kubernetes/Fargate/Docker when stopping a container
+- **SIGINT**: Sent when pressing Ctrl+C (useful for local development)
+
+### Shutdown Process
+1. Signal handler receives SIGTERM/SIGINT
+2. Logs the shutdown initiation
+3. Waits 2 seconds for in-flight requests to complete
+4. Closes HTTP client connections gracefully
+5. Closes Redis connections
+6. Uvicorn waits up to 10 seconds for final cleanup (configurable via `--timeout-graceful-shutdown`)
+
+### Benefits for AWS Fargate
+- Prevents connection errors during deployments
+- Ensures requests complete before container termination
+- Proper cleanup of resources (connections, file handles)
+- Compliance with the Fargate task stop behavior (30-second default stop timeout)
+
+### Testing Graceful Shutdown Locally
+```bash
+# Start the application
+docker run -p 8000:8000 weather-proxy:latest
+
+# In another terminal, send SIGTERM
+docker kill --signal=SIGTERM <container-id>
+
+# Check logs for shutdown messages
+docker logs <container-id>
+```
 
 ## Building the Docker Image
 

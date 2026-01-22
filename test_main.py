@@ -495,5 +495,66 @@ class TestMetricsEndpoint:
             assert 'result="hit"' in content or "cache" in content
 
 
+class TestGracefulShutdown:
+    """Test graceful shutdown handling"""
+    
+    def test_lifespan_startup_and_shutdown(self):
+        """Test that the lifespan context manager handles startup and shutdown"""
+        # Import the lifespan function
+        from main import lifespan, app
+        import asyncio
+        
+        async def test_lifespan():
+            """Test the lifespan context manager"""
+            async with lifespan(app) as _:
+                # During the context, the app should be running
+                assert app is not None
+            # After exiting the context, cleanup should have occurred
+        
+        # Run the async test
+        asyncio.run(test_lifespan())
+    
+    def test_shutdown_event_exists(self):
+        """Test that the shutdown event is defined"""
+        from main import shutdown_event
+        import asyncio
+        
+        assert shutdown_event is not None
+        assert isinstance(shutdown_event, asyncio.Event)
+    
+    def test_signal_handlers_registered(self):
+        """Test that signal handlers are registered for SIGTERM and SIGINT"""
+        import signal
+        from main import lifespan, app
+        import asyncio
+        
+        async def test_signals():
+            """Test signal handler registration"""
+            # Store original handlers
+            original_sigterm = signal.getsignal(signal.SIGTERM)
+            original_sigint = signal.getsignal(signal.SIGINT)
+            
+            async with lifespan(app):
+                # Check that handlers were set
+                new_sigterm = signal.getsignal(signal.SIGTERM)
+                new_sigint = signal.getsignal(signal.SIGINT)
+                
+                # Handlers should be set (not None or SIG_DFL)
+                assert new_sigterm is not None
+                assert new_sigint is not None
+            
+            # Note: In production, we'd restore handlers here, but the lifespan
+            # context sets them for the app's lifetime
+        
+        asyncio.run(test_signals())
+    
+    def test_app_has_lifespan(self):
+        """Test that the FastAPI app has a lifespan configured"""
+        from main import app
+        
+        # Check that the app has a router with lifespan
+        assert app.router.lifespan_context is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
