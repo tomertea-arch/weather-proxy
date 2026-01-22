@@ -1,0 +1,38 @@
+apiVersion: v2
+name: weather-proxy
+description: A FastAPI-based proxy microservice with Redis caching for weather data
+type: application
+
+# This is the chart version. This version number should be incremented each time you make changes
+# to the chart and its templates, including the app version.
+version: 1.0.0
+
+# This is the version number of the application being deployed.
+appVersion: "1.0.0"
+
+keywords:
+  - weather
+  - proxy
+  - fastapi
+  - redis
+  - microservice
+
+maintainers:
+  - name: tomer traivish
+    email: trivish@hotmail.com
+
+sources:
+  - https://github.com/tomertea-arch/weather-proxy
+
+home: https://github.com/tomertea-arch/weather-proxy
+
+icon: https://fastapi.tiangolo.com/img/icon-white.svg
+
+# Dependencies (if using external Redis chart)
+dependencies:
+  - name: redis
+    version: "17.x.x"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: redis.enabled
+    tags:
+      - weather-proxy-cache

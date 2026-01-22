@@ -1,0 +1,75 @@
+# Staging values for weather-proxy
+# This overrides the default values.yaml for staging/testing deployments
+
+replicaCount: 2
+
+image:
+  repository: your-registry/weather-proxy
+  pullPolicy: Always  # Always pull for testing
+  tag: "staging"
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  enabled: false
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+  hosts:
+    - host: weather-api-staging.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: weather-proxy-staging-tls
+      hosts:
+        - weather-api-staging.example.com
+
+config:
+  redis:
+    host: "weather-proxy-redis-master"
+    port: 6379
+    db: 0
+    password: ""
+    external: false
+  log:
+    level: "DEBUG"  # More verbose logging for staging
+    file: "weather-proxy.log"
+
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false  # Simplified for staging
+  master:
+    persistence:
+      enabled: true
+      size: 2Gi
+    resources:
+      limits:
+        cpu: 250m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+podDisruptionBudget:
+  enabled: false  # Not critical for staging
+
+serviceMonitor:
+  enabled: false  # Optional for staging
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

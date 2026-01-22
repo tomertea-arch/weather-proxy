@@ -87,6 +87,62 @@ docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/weather-proxy:latest
    - Health check: GET /health
    - Environment variables for Redis connection
 
+## Kubernetes/Helm Deployment
+
+The application includes a complete Helm chart for Kubernetes deployment.
+
+### Quick Start with Helm
+
+```bash
+# Install with default values
+helm install weather-proxy ./helm/weather-proxy
+
+# Install with custom values
+helm install weather-proxy ./helm/weather-proxy \
+  --set image.repository=your-registry/weather-proxy \
+  --set image.tag=1.0.0 \
+  --namespace weather-proxy \
+  --create-namespace
+
+# Install for production
+helm install weather-proxy ./helm/weather-proxy \
+  -f ./helm/weather-proxy/values-production.yaml
+```
+
+### Helm Chart Features
+
+- ✅ Deployment with configurable replicas
+- ✅ Service (ClusterIP, NodePort, LoadBalancer)
+- ✅ Optional Ingress with TLS support
+- ✅ Horizontal Pod Autoscaling (HPA)
+- ✅ Pod Disruption Budget for high availability
+- ✅ ServiceMonitor for Prometheus Operator
+- ✅ ConfigMap and Secret management
+- ✅ Health checks (liveness & readiness probes)
+- ✅ Optional Redis dependency (or use external Redis)
+- ✅ Security contexts and non-root user
+- ✅ Resource limits and requests
+
+### Helm Chart Files
+
+```
+helm/weather-proxy/
+├── Chart.yaml                  # Chart metadata
+├── values.yaml                 # Default configuration
+├── values-production.yaml      # Production overrides
+├── values-staging.yaml         # Staging overrides
+├── README.md                   # Detailed chart documentation
+└── templates/                  # Kubernetes resource templates
+    ├── deployment.yaml
+    ├── service.yaml
+    ├── ingress.yaml
+    ├── hpa.yaml
+    ├── configmap.yaml
+    └── ... (more templates)
+```
+
+For detailed Helm deployment instructions, see [helm/HELM_DEPLOYMENT.md](helm/HELM_DEPLOYMENT.md)
+
 ## API Endpoints
 
 - `GET /health` - Health check with metrics (service status, request count, error count, Redis status)

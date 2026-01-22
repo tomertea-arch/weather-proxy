@@ -1,0 +1,106 @@
+# Production values for weather-proxy
+# This overrides the default values.yaml for production deployments
+
+replicaCount: 3
+
+image:
+  repository: your-registry/weather-proxy
+  pullPolicy: IfNotPresent
+  tag: "1.0.0"
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 75
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - host: weather-api.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: weather-proxy-tls
+      hosts:
+        - weather-api.example.com
+
+config:
+  redis:
+    host: "weather-proxy-redis-master"
+    port: 6379
+    db: 0
+    password: ""  # Set via secret or external secret management
+    external: false
+  log:
+    level: "INFO"
+    file: "weather-proxy.log"
+
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: true
+    password: ""  # Set via values or external secret management
+  master:
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClass: ""  # Use default storage class
+    resources:
+      limits:
+        cpu: 500m
+        memory: 512Mi
+      requests:
+        cpu: 250m
+        memory: 256Mi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  labels:
+    release: prometheus
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - weather-proxy
+        topologyKey: kubernetes.io/hostname
+
+nodeSelector: {}
+  # Example: pin to specific node pool
+  # node-pool: production
+
+tolerations: []
+  # Example: tolerate specific taints
+  # - key: "production"
+  #   operator: "Equal"
+  #   value: "true"
+  #   effect: "NoSchedule"

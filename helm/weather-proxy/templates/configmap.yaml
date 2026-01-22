@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "weather-proxy.fullname" . }}-config
+  labels:
+    {{- include "weather-proxy.labels" . | nindent 4 }}
+data:
+  redis-host: {{ include "weather-proxy.redisHost" . | quote }}
+  redis-port: {{ include "weather-proxy.redisPort" . | quote }}
+  redis-db: {{ .Values.config.redis.db | quote }}
+  log-level: {{ .Values.config.log.level | quote }}
+  log-file: {{ .Values.config.log.file | quote }}
