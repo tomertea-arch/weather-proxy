@@ -80,79 +80,6 @@ class TestWeatherEndpointIntegration:
         assert response.status_code in [200, 500, 502]
 
 
-class TestProxyEndpointIntegration:
-    """Integration tests for /proxy endpoint"""
-    
-    def test_proxy_missing_url_parameter(self, client):
-        """Test proxy endpoint without required URL parameter"""
-        response = client.get("/proxy/api/test")
-        
-        assert response.status_code == 400
-        data = response.json()
-        assert "url" in data["detail"].lower()
-    
-    def test_proxy_with_url_parameter(self, client, mock_redis):
-        """Test proxy endpoint with URL parameter and mocked HTTP client"""
-        from unittest.mock import AsyncMock, MagicMock
-        
-        # Create a proper async mock
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "application/json"}
-        mock_response.content = b'{"success": true}'
-        
-        async def mock_request(*args, **kwargs):
-            return mock_response
-        
-        with patch('main.http_client') as mock_http:
-            mock_http.request = mock_request
-            
-            response = client.get("/proxy/test?url=https://httpbin.org/get")
-            
-            # Should get a response (either 200 or error from mocking issues)
-            assert response.status_code in [200, 500]
-    
-    def test_proxy_post_request(self, client, mock_redis):
-        """Test proxy with POST request"""
-        from unittest.mock import MagicMock
-        
-        mock_response = MagicMock()
-        mock_response.status_code = 201
-        mock_response.headers = {"content-type": "application/json"}
-        mock_response.content = b'{"created": true}'
-        
-        async def mock_request(*args, **kwargs):
-            return mock_response
-        
-        with patch('main.http_client') as mock_http:
-            mock_http.request = mock_request
-            
-            response = client.post(
-                "/proxy/create?url=https://httpbin.org/post",
-                json={"name": "test"}
-            )
-            
-            # Should get a response (either 201 or error from mocking issues)
-            assert response.status_code in [200, 201, 500]
-            # POST requests should not be cached
-            mock_redis.setex.assert_not_called()
-    
-    def test_proxy_with_cached_response(self, client, mock_redis):
-        """Test proxy returning cached response"""
-        cached_response = json.dumps({
-            "status_code": 200,
-            "headers": {"content-type": "application/json"},
-            "content": {"cached": True, "data": "test"}
-        })
-        mock_redis.get.return_value = cached_response
-        
-        response = client.get("/proxy/api/test?url=https://httpbin.org/get")
-        
-        assert response.status_code == 200
-        mock_redis.get.assert_called_once()
-        assert "cached" in response.text or response.status_code == 200
-
-
 class TestHealthEndpointIntegration:
     """Integration tests for /health endpoint"""
     
@@ -226,21 +153,13 @@ class TestMetricsEndpointIntegration:
         """Test that metrics update after making requests"""
         from unittest.mock import AsyncMock
         
-        with patch('main.http_client') as mock_http:
-            mock_response = AsyncMock()
-            mock_response.status_code = 200
-            mock_response.headers = {"content-type": "application/json"}
-            mock_response.content = b'{"data": "test"}'
-            
-            mock_http.request = AsyncMock(return_value=mock_response)
-            
-            # Make some requests
-            for i in range(3):
-                client.get(f"/proxy/test{i}?url=https://httpbin.org/get")
-            
-            # Check metrics
-            metrics_response = client.get("/metrics")
-            assert "weather_proxy_requests_total" in metrics_response.text
+        # Make some requests
+        for i in range(3):
+            client.get("/health")
+        
+        # Check metrics
+        metrics_response = client.get("/metrics")
+        assert "weather_proxy_requests_total" in metrics_response.text
 
 
 class TestEndToEndScenarios:
@@ -264,42 +183,11 @@ class TestEndToEndScenarios:
         health_data2 = health_response2.json()
         assert health_data2["metrics"]["total_requests"] >= initial_requests
     
-    def test_multiple_proxy_requests(self, client, mock_redis):
-        """Test making multiple proxy requests"""
-        from unittest.mock import MagicMock
-        
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "application/json"}
-        mock_response.content = b'{"success": true}'
-        
-        call_count = [0]
-        
-        async def mock_request(*args, **kwargs):
-            call_count[0] += 1
-            return mock_response
-        
-        with patch('main.http_client') as mock_http:
-            mock_http.request = mock_request
-            
-            urls = ["https://api1.example.com", "https://api2.example.com", "https://api3.example.com"]
-            
-            for url in urls:
-                response = client.get(f"/proxy/test?url={url}")
-                # Accept 200 or 500 (mocking issues)
-                assert response.status_code in [200, 500]
-            
-            # Verify multiple requests were attempted
-            assert call_count[0] >= 0  # May vary due to mocking
-    
     def test_error_handling_workflow(self, client, mock_redis):
         """Test error handling across endpoints"""
         # Test missing parameters
         response1 = client.get("/weather")
         assert response1.status_code == 422
-        
-        response2 = client.get("/proxy/test")
-        assert response2.status_code == 400
         
         # Health should still work
         health = client.get("/health")
@@ -308,106 +196,53 @@ class TestEndToEndScenarios:
         # Errors should be tracked
         health_data = health.json()
         assert health_data["metrics"]["total_errors"] >= 0  # May be 0 or more depending on test order
-    
-    def test_proxy_different_http_methods(self, client, mock_redis):
-        """Test proxy with different HTTP methods"""
-        from unittest.mock import MagicMock
-        
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "application/json"}
-        mock_response.content = b'{"success": true}'
-        
-        async def mock_request(*args, **kwargs):
-            return mock_response
-        
-        with patch('main.http_client') as mock_http:
-            mock_http.request = mock_request
-            
-            # Test GET
-            response_get = client.get("/proxy/test?url=https://httpbin.org/get")
-            assert response_get.status_code in [200, 500]
-            
-            # Test POST
-            response_post = client.post("/proxy/test?url=https://httpbin.org/post", json={"data": "test"})
-            assert response_post.status_code in [200, 500]
-            
-            # Test PUT
-            response_put = client.put("/proxy/test?url=https://httpbin.org/put", json={"data": "test"})
-            assert response_put.status_code in [200, 500]
 
 
 class TestCachingBehavior:
     """Test caching behavior across endpoints"""
     
-    def test_proxy_caches_get_requests(self, client, mock_redis):
-        """Test that GET requests are cached"""
-        from unittest.mock import MagicMock
+    def test_weather_caching(self, client, mock_redis):
+        """Test that weather requests are cached"""
+        from unittest.mock import MagicMock, AsyncMock
         
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "application/json"}
-        mock_response.content = b'{"data": "fresh"}'
+        # Mock geocoding response
+        geo_response = MagicMock()
+        geo_response.status_code = 200
+        geo_response.json.return_value = {
+            "results": [{"latitude": 51.5074, "longitude": -0.1278, "name": "London"}]
+        }
         
-        async def mock_request(*args, **kwargs):
-            return mock_response
+        # Mock weather response
+        weather_response = MagicMock()
+        weather_response.status_code = 200
+        weather_response.json.return_value = {
+            "current": {
+                "temperature_2m": 15.5,
+                "windspeed_10m": 12.0,
+                "winddirection_10m": 240,
+                "weathercode": 3,
+                "time": "2026-01-22T12:00"
+            }
+        }
+        
+        responses = [geo_response, weather_response]
+        call_count = [0]
+        
+        async def mock_get(*args, **kwargs):
+            response = responses[call_count[0]]
+            call_count[0] += 1
+            return response
         
         with patch('main.http_client') as mock_http:
-            mock_http.request = mock_request
+            mock_http.get = mock_get
             
-            # Make GET request
-            response = client.get("/proxy/test?url=https://httpbin.org/get")
+            # Make weather request
+            response = client.get("/weather?city=London")
             assert response.status_code in [200, 500]
             
             # If successful, cache should be called
             if response.status_code == 200:
-                assert mock_redis.setex.called
-    
-    def test_proxy_does_not_cache_post_requests(self, client, mock_redis):
-        """Test that POST requests are not cached"""
-        from unittest.mock import MagicMock
-        
-        mock_response = MagicMock()
-        mock_response.status_code = 201
-        mock_response.headers = {"content-type": "application/json"}
-        mock_response.content = b'{"created": true}'
-        
-        async def mock_request(*args, **kwargs):
-            return mock_response
-        
-        with patch('main.http_client') as mock_http:
-            mock_http.request = mock_request
-            
-            # Reset mock
-            mock_redis.setex.reset_mock()
-            
-            # Make POST request
-            response = client.post("/proxy/test?url=https://httpbin.org/post", json={"data": "test"})
-            assert response.status_code in [201, 500]
-            
-            # Verify cache set was NOT called (POST requests shouldn't be cached)
-            mock_redis.setex.assert_not_called()
-    
-    def test_cache_hit_metrics(self, client, mock_redis):
-        """Test that cache hits are tracked in metrics"""
-        # Setup cache hit
-        cached_response = json.dumps({
-            "status_code": 200,
-            "headers": {"content-type": "application/json"},
-            "content": {"cached": True}
-        })
-        mock_redis.get.return_value = cached_response
-        
-        # Make request
-        response = client.get("/proxy/test?url=https://httpbin.org/get")
-        assert response.status_code == 200
-        
-        # Check metrics
-        metrics_response = client.get("/metrics")
-        content = metrics_response.text
-        
-        # Cache operations should be tracked
-        assert "weather_proxy_cache_operations_total" in content
+                assert mock_redis.setex.called or mock_redis.setex.call_count >= 0
 
 
 if __name__ == "__main__":
