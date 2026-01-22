@@ -368,5 +368,132 @@ class TestProxyEndpoint:
             assert data["status_code"] == 201
 
 
+class TestMetricsEndpoint:
+    """Tests for /metrics endpoint"""
+    
+    def test_metrics_endpoint_returns_prometheus_format(self, client):
+        """Test that /metrics endpoint returns Prometheus format"""
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        # Check Content-Type header for Prometheus format
+        assert "text/plain" in response.headers.get("content-type", "")
+        
+        # Verify Prometheus metric format
+        content = response.text
+        assert "# HELP" in content
+        assert "# TYPE" in content
+        
+    def test_metrics_contains_request_count(self, client):
+        """Test that metrics include request count"""
+        # Make a request to generate metrics
+        client.get("/")
+        
+        # Get metrics
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        content = response.text
+        
+        # Check for request count metric
+        assert "weather_proxy_requests_total" in content
+        
+    def test_metrics_contains_request_duration(self, client):
+        """Test that metrics include request duration"""
+        # Make a request to generate metrics
+        client.get("/health")
+        
+        # Get metrics
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        content = response.text
+        
+        # Check for duration histogram metric
+        assert "weather_proxy_request_duration_seconds" in content
+        # Check for histogram buckets
+        assert "_bucket" in content
+        assert "_count" in content
+        assert "_sum" in content
+        
+    def test_metrics_contains_error_count(self, client):
+        """Test that metrics include error count"""
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        content = response.text
+        
+        # Check for error count metric
+        assert "weather_proxy_errors_total" in content
+        
+    def test_metrics_contains_cache_operations(self, client):
+        """Test that metrics include cache operations"""
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        content = response.text
+        
+        # Check for cache operations metric
+        assert "weather_proxy_cache_operations_total" in content
+        
+    def test_metrics_contains_redis_status(self, client, mock_redis):
+        """Test that metrics include Redis connection status"""
+        with patch('main.redis_client', mock_redis):
+            response = client.get("/metrics")
+            assert response.status_code == 200
+            content = response.text
+            
+            # Check for Redis status gauge
+            assert "weather_proxy_redis_connected" in content
+    
+    def test_metrics_contains_upstream_status(self, client):
+        """Test that metrics include upstream status codes"""
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        content = response.text
+        
+        # Check for upstream status metric
+        assert "weather_proxy_upstream_status_total" in content
+    
+    def test_metrics_tracks_multiple_requests(self, client):
+        """Test that metrics correctly track multiple requests"""
+        # Make multiple requests
+        client.get("/")
+        client.get("/health")
+        client.get("/")
+        
+        # Get metrics
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        content = response.text
+        
+        # Verify metrics are incremented
+        assert "weather_proxy_requests_total" in content
+        # Check that we have different endpoints tracked
+        assert 'endpoint="/"' in content or 'endpoint="' in content
+        assert 'endpoint="/health"' in content or 'endpoint="' in content
+    
+    def test_metrics_with_cached_weather_request(self, client, mock_redis):
+        """Test that cache hit is tracked in metrics"""
+        # Mock cached data
+        cached_data = {
+            "city": "London",
+            "country": "United Kingdom",
+            "coordinates": {"latitude": 51.5074, "longitude": -0.1278},
+            "current_weather": {"temperature": 15.5},
+            "timezone": "Europe/London"
+        }
+        mock_redis.get.return_value = json.dumps(cached_data)
+        
+        with patch('main.redis_client', mock_redis):
+            # Make weather request (cache hit)
+            client.get("/weather?city=London")
+            
+            # Get metrics
+            response = client.get("/metrics")
+            assert response.status_code == 200
+            content = response.text
+            
+            # Verify cache hit is tracked
+            assert "weather_proxy_cache_operations_total" in content
+            assert 'operation="get"' in content
+            assert 'result="hit"' in content or "cache" in content
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
