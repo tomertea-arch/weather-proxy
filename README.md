@@ -71,6 +71,17 @@ docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/weather-proxy:latest
       "/health": 10,
       "/weather": 100,
       "/proxy/GET": 40
+    },
+    "request_duration": {
+      "avg_ms": 45.32,
+      "min_ms": 5.21,
+      "max_ms": 523.45,
+      "count": 150
+    },
+    "upstream_status_codes": {
+      "200": 145,
+      "404": 3,
+      "500": 2
     }
   },
   "redis": {
@@ -79,6 +90,21 @@ docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/weather-proxy:latest
     "port": 6379
   }
 }
+```
+
+### Logged Metrics
+
+All requests log the following key metrics:
+- **Request duration**: Time taken to process the request (in milliseconds)
+- **Upstream status codes**: HTTP status codes received from upstream services (Open-Meteo API, proxied targets)
+- **Cache hits/misses**: Whether the response was served from Redis cache
+
+Example log entries:
+```
+INFO - Weather request completed: city=London, duration=234.56ms, cached=False
+INFO - Weather API response: status=200
+INFO - Proxy request completed: method=GET, url=https://api.example.com, upstream_status=200, duration=156.78ms
+INFO - Cache hit for weather:london, duration=2.34ms
 ```
 
 ## Example Usage

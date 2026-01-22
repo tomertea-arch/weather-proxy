@@ -48,6 +48,10 @@ class TestHealthEndpoint:
             assert "metrics" in data
             assert "total_requests" in data["metrics"]
             assert "total_errors" in data["metrics"]
+            # Check new metrics: request_duration and upstream_status_codes
+            assert "request_duration" in data["metrics"]
+            assert "avg_ms" in data["metrics"]["request_duration"]
+            assert "upstream_status_codes" in data["metrics"]
     
     def test_health_check_with_redis_connected(self, client, mock_redis):
         """Test health check when Redis is connected"""

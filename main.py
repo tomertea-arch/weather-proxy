@@ -8,6 +8,7 @@ import httpx
 import redis
 import os
 import json
+import time
 from typing import Optional
 import logging
 from logging.handlers import RotatingFileHandler
@@ -91,6 +92,9 @@ class Metrics:
         self.request_count = 0
         self.error_count = 0
         self.requests_by_endpoint = {}
+        self.request_durations = []  # Store last N request durations
+        self.upstream_status_codes = {}  # Track upstream response status codes
+        self.max_duration_samples = 1000  # Keep last 1000 samples
     
     def increment_request(self, endpoint: str = "unknown"):
         self.request_count += 1
@@ -99,11 +103,37 @@ class Metrics:
     def increment_error(self):
         self.error_count += 1
     
+    def record_duration(self, duration_ms: float):
+        """Record request duration in milliseconds"""
+        self.request_durations.append(duration_ms)
+        # Keep only last N samples
+        if len(self.request_durations) > self.max_duration_samples:
+            self.request_durations = self.request_durations[-self.max_duration_samples:]
+    
+    def record_upstream_status(self, status_code: int):
+        """Record upstream response status code"""
+        key = str(status_code)
+        self.upstream_status_codes[key] = self.upstream_status_codes.get(key, 0) + 1
+    
+    def get_duration_stats(self):
+        """Calculate duration statistics"""
+        if not self.request_durations:
+            return {"avg_ms": 0, "min_ms": 0, "max_ms": 0, "count": 0}
+        
+        return {
+            "avg_ms": round(sum(self.request_durations) / len(self.request_durations), 2),
+            "min_ms": round(min(self.request_durations), 2),
+            "max_ms": round(max(self.request_durations), 2),
+            "count": len(self.request_durations)
+        }
+    
     def get_stats(self):
         return {
             "total_requests": self.request_count,
             "total_errors": self.error_count,
-            "requests_by_endpoint": self.requests_by_endpoint.copy()
+            "requests_by_endpoint": self.requests_by_endpoint.copy(),
+            "request_duration": self.get_duration_stats(),
+            "upstream_status_codes": self.upstream_status_codes.copy()
         }
 
 metrics = Metrics()
@@ -124,7 +154,9 @@ async def health_check():
         "metrics": {
             "total_requests": stats["total_requests"],
             "total_errors": stats["total_errors"],
-            "requests_by_endpoint": stats["requests_by_endpoint"]
+            "requests_by_endpoint": stats["requests_by_endpoint"],
+            "request_duration": stats["request_duration"],
+            "upstream_status_codes": stats["upstream_status_codes"]
         }
     }
     
@@ -151,9 +183,11 @@ async def health_check():
             "status": "not_configured"
         }
     
-    # Log health check request
+    # Log health check request with key metrics
+    duration_stats = stats["request_duration"]
     logger.info(f"Health check: status={health_status['status']}, redis={redis_status}, "
-                f"requests={stats['total_requests']}, errors={stats['total_errors']}")
+                f"requests={stats['total_requests']}, errors={stats['total_errors']}, "
+                f"avg_duration={duration_stats['avg_ms']}ms, upstream_codes={stats['upstream_status_codes']}")
     
     return health_status
 
@@ -176,6 +210,7 @@ async def get_weather(city: str):
     Get weather data for a city.
     Returns cached data from Redis if available, otherwise fetches from Open-Meteo API.
     """
+    start_time = time.time()
     metrics.increment_request("/weather")
     
     if not city:
@@ -191,7 +226,9 @@ async def get_weather(city: str):
         try:
             cached_weather = redis_client.get(cache_key)
             if cached_weather:
-                logger.info(f"Cache hit for city: {city}")
+                duration_ms = (time.time() - start_time) * 1000
+                metrics.record_duration(duration_ms)
+                logger.info(f"Cache hit for city: {city}, duration={duration_ms:.2f}ms")
                 weather_result = json.loads(cached_weather)
                 weather_result["cached"] = True
                 return weather_result
@@ -212,6 +249,9 @@ async def get_weather(city: str):
         logger.info(f"Fetching coordinates for city: {city}")
         geocode_response = await http_client.get(geocode_url, params=geocode_params)
         geocode_response.raise_for_status()
+        geocode_status = geocode_response.status_code
+        metrics.record_upstream_status(geocode_status)
+        logger.info(f"Geocoding API response: status={geocode_status}")
         geocode_data = geocode_response.json()
         
         if not geocode_data.get("results") or len(geocode_data["results"]) == 0:
@@ -238,6 +278,9 @@ async def get_weather(city: str):
         logger.info(f"Fetching weather for {city_name} ({latitude}, {longitude})")
         weather_response = await http_client.get(weather_url, params=weather_params)
         weather_response.raise_for_status()
+        weather_status = weather_response.status_code
+        metrics.record_upstream_status(weather_status)
+        logger.info(f"Weather API response: status={weather_status}")
         weather_data = weather_response.json()
         
         # Combine location and weather data
@@ -261,30 +304,44 @@ async def get_weather(city: str):
             except Exception as e:
                 logger.warning(f"Cache write error: {e}")
         
+        # Record request duration
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.record_duration(duration_ms)
+        logger.info(f"Weather request completed: city={city}, duration={duration_ms:.2f}ms, cached=False")
+        
         # Add cached flag for fresh data
         result["cached"] = False
         return result
         
     except httpx.HTTPStatusError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.record_duration(duration_ms)
         metrics.increment_error()
-        logger.error(f"HTTP error fetching weather: {e}")
+        metrics.record_upstream_status(e.response.status_code)
+        logger.error(f"HTTP error fetching weather: status={e.response.status_code}, error={e}, duration={duration_ms:.2f}ms")
         raise HTTPException(
             status_code=e.response.status_code,
             detail=f"Error fetching weather data: {str(e)}"
         )
     except httpx.RequestError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.record_duration(duration_ms)
         metrics.increment_error()
-        logger.error(f"Request error fetching weather: {e}")
+        logger.error(f"Request error fetching weather: error={e}, duration={duration_ms:.2f}ms")
         raise HTTPException(
             status_code=502,
             detail=f"Error connecting to weather service: {str(e)}"
         )
     except HTTPException:
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.record_duration(duration_ms)
         metrics.increment_error()
         raise
     except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.record_duration(duration_ms)
         metrics.increment_error()
-        logger.error(f"Unexpected error fetching weather: {e}")
+        logger.error(f"Unexpected error fetching weather: error={e}, duration={duration_ms:.2f}ms")
         raise HTTPException(
             status_code=500,
             detail=f"Internal error: {str(e)}"
@@ -296,6 +353,7 @@ async def proxy_request(path: str, request: Request):
     """
     Proxy endpoint that caches GET requests in Redis
     """
+    start_time = time.time()
     metrics.increment_request(f"/proxy/{request.method}")
     
     # Get target URL from query parameter or header
@@ -315,7 +373,9 @@ async def proxy_request(path: str, request: Request):
         try:
             cached_response = redis_client.get(cache_key)
             if cached_response:
-                logger.info(f"Cache hit for {cache_key}")
+                duration_ms = (time.time() - start_time) * 1000
+                metrics.record_duration(duration_ms)
+                logger.info(f"Cache hit for {cache_key}, duration={duration_ms:.2f}ms")
                 cached_data = json.loads(cached_response)
                 return JSONResponse(
                     content=cached_data["content"],
@@ -346,6 +406,10 @@ async def proxy_request(path: str, request: Request):
             params=request.query_params
         )
         
+        # Record upstream status code
+        upstream_status = response.status_code
+        metrics.record_upstream_status(upstream_status)
+        
         # Prepare response
         response_data = {
             "status_code": response.status_code,
@@ -362,18 +426,28 @@ async def proxy_request(path: str, request: Request):
             except Exception as e:
                 logger.warning(f"Cache write error: {e}")
         
+        # Record request duration and log
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.record_duration(duration_ms)
+        logger.info(f"Proxy request completed: method={request.method}, url={target_url}, "
+                    f"upstream_status={upstream_status}, duration={duration_ms:.2f}ms")
+        
         return JSONResponse(
             content=response_data,
             status_code=response.status_code
         )
         
     except httpx.RequestError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.record_duration(duration_ms)
         metrics.increment_error()
-        logger.error(f"Proxy request error: {e}")
+        logger.error(f"Proxy request error: url={target_url}, error={e}, duration={duration_ms:.2f}ms")
         raise HTTPException(status_code=502, detail=f"Proxy error: {str(e)}")
     except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.record_duration(duration_ms)
         metrics.increment_error()
-        logger.error(f"Unexpected error: {e}")
+        logger.error(f"Unexpected proxy error: url={target_url}, error={e}, duration={duration_ms:.2f}ms")
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 
