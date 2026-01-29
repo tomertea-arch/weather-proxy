@@ -4,6 +4,7 @@ Optimized for AWS Fargate deployment
 """
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 import httpx
 import redis
 import os
@@ -11,8 +12,10 @@ import json
 import time
 import signal
 import asyncio
+import uuid
 from typing import Optional
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import logging
 from logging.handlers import RotatingFileHandler
 from tenacity import (
@@ -32,6 +35,18 @@ from prometheus_client import (
     CollectorRegistry
 )
 
+# Request ID context variable for tracing
+request_id_context: ContextVar[str] = ContextVar('request_id', default='no-request-id')
+
+
+class RequestIDFilter(logging.Filter):
+    """Logging filter to inject request_id into all log records"""
+    
+    def filter(self, record):
+        record.request_id = request_id_context.get()
+        return True
+
+
 # Configure logging to file and console
 log_file = os.getenv("LOG_FILE", "weather-proxy.log")
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -40,13 +55,13 @@ log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logger = logging.getLogger(__name__)
 logger.setLevel(getattr(logging, log_level, logging.INFO))
 
-# Create formatters
+# Create formatters with request_id
 file_formatter = logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    '%(asctime)s - [%(request_id)s] - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 console_formatter = logging.Formatter(
-    '%(levelname)s - %(message)s'
+    '[%(request_id)s] - %(levelname)s - %(message)s'
 )
 
 # File handler with rotation (10MB max, 5 backup files)
@@ -57,11 +72,13 @@ file_handler = RotatingFileHandler(
 )
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(file_formatter)
+file_handler.addFilter(RequestIDFilter())
 
 # Console handler
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(console_formatter)
+console_handler.addFilter(RequestIDFilter())
 
 # Add handlers to logger
 logger.addHandler(file_handler)
@@ -72,6 +89,31 @@ logger.propagate = False
 
 # Shutdown event for graceful shutdown
 shutdown_event = asyncio.Event()
+
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to generate and inject a unique request ID for each request.
+    The request ID is propagated through all logs for request tracing.
+    """
+    
+    async def dispatch(self, request: Request, call_next):
+        # Generate or extract request ID from header
+        request_id = request.headers.get('X-Request-ID', str(uuid.uuid4()))
+        
+        # Set request ID in context for logging
+        request_id_context.set(request_id)
+        
+        # Store in request state for access in endpoints
+        request.state.request_id = request_id
+        
+        # Process request
+        response = await call_next(request)
+        
+        # Add request ID to response headers for client tracking
+        response.headers['X-Request-ID'] = request_id
+        
+        return response
 
 
 # Lifespan context manager for startup and shutdown
@@ -130,6 +172,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Add Request ID middleware
+app.add_middleware(RequestIDMiddleware)
 
 # Redis connection configuration
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -390,7 +435,7 @@ async def fetch_weather_with_retry(city: str, cache_key: str, start_time: float)
         attempt_num = retry_count["attempts"]
         
         if attempt_num > 1:
-            logger.warning(f"Retry attempt {attempt_num} for city: {city}")
+            logger.warning(f"[RETRY] Attempt {attempt_num} for city: {city}")
         
         # Step 1: Geocode the city to get coordinates
         geocode_url = "https://geocoding-api.open-meteo.com/v1/search"
@@ -401,16 +446,17 @@ async def fetch_weather_with_retry(city: str, cache_key: str, start_time: float)
             "format": "json"
         }
         
-        logger.info(f"Fetching coordinates for city: {city} (attempt {attempt_num})")
+        logger.info(f"[GEOCODE] Fetching coordinates for city: {city} (attempt {attempt_num})")
         geocode_response = await http_client.get(geocode_url, params=geocode_params)
         geocode_response.raise_for_status()
         geocode_status = geocode_response.status_code
         metrics.record_upstream_status(geocode_status)
         upstream_status_count.labels(service='open-meteo-geocoding', status_code=str(geocode_status)).inc()
-        logger.info(f"Geocoding API response: status={geocode_status}, attempt={attempt_num}")
+        logger.info(f"[GEOCODE] Response received: status={geocode_status}, attempt={attempt_num}")
         geocode_data = geocode_response.json()
         
         if not geocode_data.get("results") or len(geocode_data["results"]) == 0:
+            logger.warning(f"[GEOCODE] City not found: {city}")
             raise HTTPException(
                 status_code=404,
                 detail=f"City '{city}' not found"
@@ -422,6 +468,8 @@ async def fetch_weather_with_retry(city: str, cache_key: str, start_time: float)
         city_name = location.get("name", city)
         country = location.get("country", "")
         
+        logger.debug(f"[GEOCODE] Found: {city_name}, {country} at ({latitude}, {longitude})")
+        
         # Step 2: Fetch weather data using coordinates
         weather_url = "https://api.open-meteo.com/v1/forecast"
         weather_params = {
@@ -431,13 +479,13 @@ async def fetch_weather_with_retry(city: str, cache_key: str, start_time: float)
             "timezone": "auto"
         }
         
-        logger.info(f"Fetching weather for {city_name} ({latitude}, {longitude}) (attempt {attempt_num})")
+        logger.info(f"[WEATHER API] Fetching data for {city_name} ({latitude}, {longitude}) (attempt {attempt_num})")
         weather_response = await http_client.get(weather_url, params=weather_params)
         weather_response.raise_for_status()
         weather_status = weather_response.status_code
         metrics.record_upstream_status(weather_status)
         upstream_status_count.labels(service='open-meteo-weather', status_code=str(weather_status)).inc()
-        logger.info(f"Weather API response: status={weather_status}, attempt={attempt_num}")
+        logger.info(f"[WEATHER API] Response received: status={weather_status}, attempt={attempt_num}")
         weather_data = weather_response.json()
         
         # Combine location and weather data
@@ -461,33 +509,42 @@ async def fetch_weather_with_retry(city: str, cache_key: str, start_time: float)
         if redis_client:
             try:
                 redis_client.setex(cache_key, 600, json.dumps(result))
-                logger.info(f"Cached weather data for city: {city}")
+                logger.info(f"[CACHE WRITE] Stored weather data for city: {city}, TTL=600s")
             except Exception as e:
-                logger.warning(f"Cache write error: {e}")
+                logger.warning(f"[CACHE WRITE] Error storing cache: {e}")
         
         # Log successful completion with retry count
         if retry_count["attempts"] > 1:
-            logger.info(f"Weather fetch succeeded after {retry_count['attempts']} attempts for city: {city}")
+            logger.info(f"[SUCCESS] Fetch succeeded after {retry_count['attempts']} attempts for city: {city}")
+        else:
+            logger.info(f"[SUCCESS] Fetch completed on first attempt for city: {city}")
         
         return result
     
     except Exception as e:
-        logger.error(f"Weather fetch failed after {retry_count['attempts']} attempts for city: {city}, error={e}")
+        logger.error(f"[FETCH FAILED] Failed after {retry_count['attempts']} attempts for city: {city}, error={e}")
         raise
 
 
 @app.get("/weather")
-async def get_weather(city: str):
+async def get_weather(city: str, request: Request):
     """
     Get weather data for a city.
     Returns cached data from Redis if available, otherwise fetches from Open-Meteo API.
     Implements retry mechanism with exponential backoff for transient failures.
+    Each request is traced with a unique request_id for debugging.
     """
     start_time = time.time()
     metrics.increment_request("/weather")
     
+    # Get request ID from state
+    request_id = request.state.request_id
+    
+    logger.info(f"[START] Weather request for city: {city}")
+    
     if not city:
         metrics.increment_error()
+        logger.error("City parameter is missing")
         raise HTTPException(status_code=400, detail="City parameter is required")
     
     # Normalize city name for cache key (lowercase, strip whitespace)
@@ -497,11 +554,12 @@ async def get_weather(city: str):
     # Check Redis cache first
     if redis_client:
         try:
+            logger.debug(f"Checking cache for key: {cache_key}")
             cached_weather = redis_client.get(cache_key)
             if cached_weather:
                 duration_ms = (time.time() - start_time) * 1000
                 metrics.record_duration(duration_ms)
-                logger.info(f"Cache hit for city: {city}, duration={duration_ms:.2f}ms")
+                logger.info(f"[CACHE HIT] City: {city}, duration={duration_ms:.2f}ms")
                 
                 # Track Prometheus metrics
                 cache_operations.labels(operation='get', result='hit').inc()
@@ -510,8 +568,11 @@ async def get_weather(city: str):
                 
                 weather_result = json.loads(cached_weather)
                 weather_result["cached"] = True
+                weather_result["request_id"] = request_id
+                logger.info(f"[END] Request completed successfully (cached)")
                 return weather_result
             else:
+                logger.info(f"[CACHE MISS] City: {city}, fetching from API")
                 cache_operations.labels(operation='get', result='miss').inc()
         except Exception as e:
             logger.warning(f"Cache read error: {e}")
@@ -519,19 +580,22 @@ async def get_weather(city: str):
     
     # Fetch fresh data from Open-Meteo with retry mechanism
     try:
+        logger.info(f"[FETCH] Starting API fetch for city: {city}")
         result = await fetch_weather_with_retry(city, cache_key, start_time)
         
         # Record request duration
         duration_ms = (time.time() - start_time) * 1000
         metrics.record_duration(duration_ms)
-        logger.info(f"Weather request completed: city={city}, duration={duration_ms:.2f}ms, cached=False")
+        logger.info(f"[API SUCCESS] City: {city}, duration={duration_ms:.2f}ms")
         
         # Track Prometheus metrics
         request_latency.labels(endpoint='/weather', method='GET').observe(duration_ms / 1000)
         request_count.labels(endpoint='/weather', method='GET', status='200').inc()
         
-        # Add cached flag for fresh data
+        # Add cached flag and request ID for fresh data
         result["cached"] = False
+        result["request_id"] = request_id
+        logger.info(f"[END] Request completed successfully (fresh data)")
         return result
         
     except httpx.HTTPStatusError as e:
@@ -545,7 +609,7 @@ async def get_weather(city: str):
         request_count.labels(endpoint='/weather', method='GET', status=str(e.response.status_code)).inc()
         error_count.labels(endpoint='/weather', error_type='http_error').inc()
         
-        logger.error(f"HTTP error fetching weather: status={e.response.status_code}, error={e}, duration={duration_ms:.2f}ms")
+        logger.error(f"[ERROR] HTTP error: city={city}, status={e.response.status_code}, error={e}, duration={duration_ms:.2f}ms")
         raise HTTPException(
             status_code=e.response.status_code,
             detail=f"Error fetching weather data: {str(e)}"
@@ -560,7 +624,7 @@ async def get_weather(city: str):
         request_count.labels(endpoint='/weather', method='GET', status='502').inc()
         error_count.labels(endpoint='/weather', error_type='request_error').inc()
         
-        logger.error(f"Request error fetching weather: error={e}, duration={duration_ms:.2f}ms")
+        logger.error(f"[ERROR] Request error: city={city}, error={e}, duration={duration_ms:.2f}ms")
         raise HTTPException(
             status_code=502,
             detail=f"Error connecting to weather service: {str(e)}"
@@ -575,6 +639,7 @@ async def get_weather(city: str):
         request_count.labels(endpoint='/weather', method='GET', status=str(e.status_code)).inc()
         error_count.labels(endpoint='/weather', error_type='http_exception').inc()
         
+        logger.error(f"[ERROR] HTTP exception: city={city}, status={e.status_code}")
         raise
     except Exception as e:
         duration_ms = (time.time() - start_time) * 1000
@@ -586,7 +651,7 @@ async def get_weather(city: str):
         request_count.labels(endpoint='/weather', method='GET', status='500').inc()
         error_count.labels(endpoint='/weather', error_type='internal_error').inc()
         
-        logger.error(f"Unexpected error fetching weather: error={e}, duration={duration_ms:.2f}ms")
+        logger.error(f"[ERROR] Unexpected error: city={city}, error={e}, duration={duration_ms:.2f}ms")
         raise HTTPException(
             status_code=500,
             detail=f"Internal error: {str(e)}"

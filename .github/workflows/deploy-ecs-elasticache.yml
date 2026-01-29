@@ -1,0 +1,269 @@
+name: Deploy to ECS with ElastiCache
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: weather-proxy
+  ECS_CLUSTER: weather-proxy-cluster-eu-west
+  ECS_SERVICE: weather-proxy-service
+  ECS_TASK_FAMILY: weather-proxy
+  CONTAINER_NAME: weather-proxy
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
+      
+      - name: Run tests
+        run: |
+          pytest test_main.py -v --cov=main --cov-report=term-missing
+        env:
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+          LOG_LEVEL: DEBUG
+
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
+    outputs:
+      image-uri: ${{ steps.build-image.outputs.image }}
+      image-tag: ${{ steps.meta.outputs.tag }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Generate image metadata
+        id: meta
+        run: |
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            TAG="production-$(echo ${{ github.sha }} | cut -c1-7)"
+          elif [ "${{ github.ref }}" == "refs/heads/develop" ]; then
+            TAG="staging-$(echo ${{ github.sha }} | cut -c1-7)"
+          else
+            TAG="$(echo ${{ github.sha }} | cut -c1-7)"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+      
+      - name: Build, tag, and push image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          docker build \
+            --build-arg BUILD_DATE=${{ steps.meta.outputs.date }} \
+            --build-arg VCS_REF=${{ github.sha }} \
+            --build-arg VERSION=${{ steps.meta.outputs.tag }} \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            .
+          
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "✅ Image pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+      
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.build-image.outputs.image }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+        continue-on-error: true
+      
+      - name: Upload scan results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+        continue-on-error: true
+
+  deploy-production:
+    name: Deploy to Production with ElastiCache
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    environment:
+      name: production
+      url: http://${{ steps.get-alb.outputs.alb-dns }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Get ElastiCache endpoint
+        id: get-elasticache
+        run: |
+          ELASTICACHE_ENDPOINT=$(aws elasticache describe-cache-clusters \
+            --cache-cluster-id ${{ secrets.ELASTICACHE_CLUSTER_ID }} \
+            --show-cache-node-info \
+            --region ${{ env.AWS_REGION }} \
+            --query 'CacheClusters[0].CacheNodes[0].Endpoint.Address' \
+            --output text)
+          
+          echo "endpoint=$ELASTICACHE_ENDPOINT" >> $GITHUB_OUTPUT
+          echo "✅ ElastiCache endpoint: $ELASTICACHE_ENDPOINT"
+      
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_TASK_FAMILY }} \
+            --region ${{ env.AWS_REGION }} \
+            --query taskDefinition > task-definition.json
+      
+      - name: Update task definition with ElastiCache
+        id: update-task-def
+        run: |
+          # Read current task definition
+          TASK_DEF=$(cat task-definition.json)
+          
+          # Create new task definition with updated image and ElastiCache endpoint
+          NEW_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "${{ needs.build-and-push.outputs.image-uri }}" \
+            --arg REDIS_HOST "${{ steps.get-elasticache.outputs.endpoint }}" \
+            '.containerDefinitions[0].image = $IMAGE |
+             .containerDefinitions[0].environment = [
+               .containerDefinitions[0].environment[] |
+               if .name == "REDIS_HOST" then .value = $REDIS_HOST else . end
+             ]')
+          
+          echo $NEW_TASK_DEF > new-task-definition.json
+      
+      - name: Fill in new image in task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ needs.build-and-push.outputs.image-uri }}
+      
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+      
+      - name: Get ALB DNS
+        id: get-alb
+        run: |
+          ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --names weather-proxy-alb \
+            --region ${{ env.AWS_REGION }} \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text)
+          echo "alb-dns=$ALB_DNS" >> $GITHUB_OUTPUT
+      
+      - name: Verify deployment
+        run: |
+          echo "✅ Deployment completed successfully!"
+          echo ""
+          echo "Application URL: http://${{ steps.get-alb.outputs.alb-dns }}"
+          echo "ElastiCache: ${{ steps.get-elasticache.outputs.endpoint }}"
+          echo "Image: ${{ needs.build-and-push.outputs.image-uri }}"
+      
+      - name: Run smoke tests
+        run: |
+          ALB_DNS="${{ steps.get-alb.outputs.alb-dns }}"
+          
+          echo "Running smoke tests..."
+          
+          # Test health endpoint
+          echo "Testing health endpoint..."
+          curl -f "http://$ALB_DNS/health" || exit 1
+          
+          # Test weather endpoint
+          echo "Testing weather endpoint..."
+          curl -f "http://$ALB_DNS/weather?city=London" || exit 1
+          
+          echo "✅ Smoke tests passed!"
+      
+      - name: Create deployment summary
+        run: |
+          echo "### Deployment Summary 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** Production" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ needs.build-and-push.outputs.image-uri }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**ElastiCache:** \`${{ steps.get-elasticache.outputs.endpoint }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**ALB:** http://${{ steps.get-alb.outputs.alb-dns }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Test Results:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Health check: Passed" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Weather API: Passed" >> $GITHUB_STEP_SUMMARY
+
+  notify-success:
+    name: Notify Success
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: success()
+    
+    steps:
+      - name: Deployment Success
+        run: |
+          echo "✅ Deployment to production with ElastiCache completed successfully!"

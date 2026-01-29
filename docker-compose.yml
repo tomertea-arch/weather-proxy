@@ -1,7 +1,10 @@
 version: '3.8'
 
+# Local Development - Uses containerized Redis
+# For AWS/ElastiCache, use environment variables to point to ElastiCache endpoint
+
 services:
-  # Weather Proxy Application with Embedded Redis (Default)
+  # Weather Proxy Application
   weather-proxy:
     build:
       context: .
@@ -10,19 +13,21 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # Redis Configuration (embedded Redis will start if not set)
-      # REDIS_HOST: redis  # Uncomment to use external Redis service
-      # REDIS_PORT: 6379
-      # REDIS_DB: 0
-      # REDIS_PASSWORD: ""
+      # Redis Configuration
+      # For local: uses 'redis' service below
+      # For AWS: override with ElastiCache endpoint
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       
       # Logging
-      LOG_LEVEL: INFO
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FILE: weather-proxy.log
     
-    # Uncomment to use external Redis
-    # depends_on:
-    #   - redis
+    depends_on:
+      redis:
+        condition: service_healthy
     
     networks:
       - weather-proxy-network
@@ -36,7 +41,7 @@ services:
       retries: 3
       start_period: 10s
 
-  # External Redis (Optional - use profile to enable)
+  # Local Redis (not used in AWS - ElastiCache used instead)
   redis:
     image: redis:7-alpine
     container_name: weather-proxy-redis
@@ -44,7 +49,13 @@ services:
       - "6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1
+      --loglevel warning
     networks:
       - weather-proxy-network
     restart: unless-stopped
@@ -53,8 +64,9 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
+      start_period: 5s
     profiles:
-      - external-redis
+      - local  # Only starts with --profile local or by default
 
 volumes:
   redis-data:

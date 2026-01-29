@@ -1,0 +1,143 @@
+================================================================================
+EXAMPLE LOGS - Before and After Request Tracing Implementation
+================================================================================
+
+BEFORE (No Request Tracing):
+────────────────────────────────────────────────────────────────────────────────
+2026-01-29 15:30:45 - __main__ - INFO - Cache hit for city: London, duration=5.23ms
+2026-01-29 15:30:46 - __main__ - INFO - Fetching coordinates for city: Paris (attempt 1)
+2026-01-29 15:30:46 - __main__ - INFO - Cache hit for city: London, duration=4.12ms
+2026-01-29 15:30:47 - __main__ - INFO - Geocoding API response: status=200, attempt=1
+2026-01-29 15:30:47 - __main__ - INFO - Fetching weather for Paris (48.8566, 2.3522) (attempt 1)
+2026-01-29 15:30:48 - __main__ - INFO - Weather API response: status=200, attempt=1
+
+❌ Problem: Can't tell which logs belong to which request!
+────────────────────────────────────────────────────────────────────────────────
+
+
+AFTER (With Request Tracing):
+────────────────────────────────────────────────────────────────────────────────
+2026-01-29 15:30:45 - [a1b2c3d4-5678-90ab-cdef-1234567890ab] - __main__ - INFO - [START] Weather request for city: London
+2026-01-29 15:30:45 - [a1b2c3d4-5678-90ab-cdef-1234567890ab] - __main__ - INFO - [CACHE HIT] City: London, duration=5.23ms
+2026-01-29 15:30:45 - [a1b2c3d4-5678-90ab-cdef-1234567890ab] - __main__ - INFO - [END] Request completed successfully (cached)
+
+2026-01-29 15:30:46 - [def-456-7890-1234-567890abcdef] - __main__ - INFO - [START] Weather request for city: Paris
+2026-01-29 15:30:46 - [def-456-7890-1234-567890abcdef] - __main__ - INFO - [CACHE MISS] City: Paris, fetching from API
+2026-01-29 15:30:46 - [def-456-7890-1234-567890abcdef] - __main__ - INFO - [FETCH] Starting API fetch for city: Paris
+2026-01-29 15:30:46 - [def-456-7890-1234-567890abcdef] - __main__ - INFO - [GEOCODE] Fetching coordinates for city: Paris (attempt 1)
+2026-01-29 15:30:47 - [def-456-7890-1234-567890abcdef] - __main__ - INFO - [GEOCODE] Response received: status=200, attempt=1
+2026-01-29 15:30:47 - [def-456-7890-1234-567890abcdef] - __main__ - DEBUG - [GEOCODE] Found: Paris, France at (48.8566, 2.3522)
+2026-01-29 15:30:47 - [def-456-7890-1234-567890abcdef] - __main__ - INFO - [WEATHER API] Fetching data for Paris (48.8566, 2.3522) (attempt 1)
+2026-01-29 15:30:48 - [def-456-7890-1234-567890abcdef] - __main__ - INFO - [WEATHER API] Response received: status=200, attempt=1
+2026-01-29 15:30:48 - [def-456-7890-1234-567890abcdef] - __main__ - INFO - [CACHE WRITE] Stored weather data for city: Paris, TTL=600s
+2026-01-29 15:30:48 - [def-456-7890-1234-567890abcdef] - __main__ - INFO - [SUCCESS] Fetch completed on first attempt for city: Paris
+2026-01-29 15:30:48 - [def-456-7890-1234-567890abcdef] - __main__ - INFO - [API SUCCESS] City: Paris, duration=1845.67ms
+2026-01-29 15:30:48 - [def-456-7890-1234-567890abcdef] - __main__ - INFO - [END] Request completed successfully (fresh data)
+
+2026-01-29 15:30:46 - [ghi-789-0123-4567-890abcdefghi] - __main__ - INFO - [START] Weather request for city: Tokyo
+2026-01-29 15:30:46 - [ghi-789-0123-4567-890abcdefghi] - __main__ - INFO - [CACHE MISS] City: Tokyo, fetching from API
+2026-01-29 15:30:46 - [ghi-789-0123-4567-890abcdefghi] - __main__ - INFO - [FETCH] Starting API fetch for city: Tokyo
+2026-01-29 15:30:46 - [ghi-789-0123-4567-890abcdefghi] - __main__ - INFO - [GEOCODE] Fetching coordinates for city: Tokyo (attempt 1)
+2026-01-29 15:30:48 - [ghi-789-0123-4567-890abcdefghi] - __main__ - INFO - [GEOCODE] Response received: status=200, attempt=1
+2026-01-29 15:30:48 - [ghi-789-0123-4567-890abcdefghi] - __main__ - INFO - [WEATHER API] Fetching data for Tokyo (35.6762, 139.6503) (attempt 1)
+2026-01-29 15:30:49 - [ghi-789-0123-4567-890abcdefghi] - __main__ - INFO - [WEATHER API] Response received: status=200, attempt=1
+2026-01-29 15:30:49 - [ghi-789-0123-4567-890abcdefghi] - __main__ - INFO - [CACHE WRITE] Stored weather data for city: Tokyo, TTL=600s
+2026-01-29 15:30:49 - [ghi-789-0123-4567-890abcdefghi] - __main__ - INFO - [END] Request completed successfully (fresh data)
+
+✅ Solution: Each request has unique ID, easy to trace!
+────────────────────────────────────────────────────────────────────────────────
+
+
+FILTERING BY REQUEST ID:
+────────────────────────────────────────────────────────────────────────────────
+Command:
+  grep "def-456-7890-1234-567890abcdef" weather-proxy.log
+
+Output (shows ONLY Paris request logs):
+  2026-01-29 15:30:46 - [def-456-7890-1234-567890abcdef] - INFO - [START] Weather request for city: Paris
+  2026-01-29 15:30:46 - [def-456-7890-1234-567890abcdef] - INFO - [CACHE MISS] City: Paris, fetching from API
+  2026-01-29 15:30:46 - [def-456-7890-1234-567890abcdef] - INFO - [FETCH] Starting API fetch for city: Paris
+  2026-01-29 15:30:46 - [def-456-7890-1234-567890abcdef] - INFO - [GEOCODE] Fetching coordinates for city: Paris (attempt 1)
+  2026-01-29 15:30:47 - [def-456-7890-1234-567890abcdef] - INFO - [GEOCODE] Response received: status=200, attempt=1
+  2026-01-29 15:30:47 - [def-456-7890-1234-567890abcdef] - DEBUG - [GEOCODE] Found: Paris, France at (48.8566, 2.3522)
+  2026-01-29 15:30:47 - [def-456-7890-1234-567890abcdef] - INFO - [WEATHER API] Fetching data for Paris (48.8566, 2.3522) (attempt 1)
+  2026-01-29 15:30:48 - [def-456-7890-1234-567890abcdef] - INFO - [WEATHER API] Response received: status=200, attempt=1
+  2026-01-29 15:30:48 - [def-456-7890-1234-567890abcdef] - INFO - [CACHE WRITE] Stored weather data for city: Paris, TTL=600s
+  2026-01-29 15:30:48 - [def-456-7890-1234-567890abcdef] - INFO - [SUCCESS] Fetch completed on first attempt for city: Paris
+  2026-01-29 15:30:48 - [def-456-7890-1234-567890abcdef] - INFO - [API SUCCESS] City: Paris, duration=1845.67ms
+  2026-01-29 15:30:48 - [def-456-7890-1234-567890abcdef] - INFO - [END] Request completed successfully (fresh data)
+
+✨ Perfect request trace from start to finish!
+────────────────────────────────────────────────────────────────────────────────
+
+
+ERROR SCENARIO WITH TRACING:
+────────────────────────────────────────────────────────────────────────────────
+2026-01-29 15:35:00 - [error-trace-123] - INFO - [START] Weather request for city: InvalidCity
+2026-01-29 15:35:00 - [error-trace-123] - DEBUG - Checking cache for key: weather:invalidcity
+2026-01-29 15:35:00 - [error-trace-123] - INFO - [CACHE MISS] City: InvalidCity, fetching from API
+2026-01-29 15:35:00 - [error-trace-123] - INFO - [FETCH] Starting API fetch for city: InvalidCity
+2026-01-29 15:35:00 - [error-trace-123] - INFO - [GEOCODE] Fetching coordinates for city: InvalidCity (attempt 1)
+2026-01-29 15:35:01 - [error-trace-123] - INFO - [GEOCODE] Response received: status=200, attempt=1
+2026-01-29 15:35:01 - [error-trace-123] - WARNING - [GEOCODE] City not found: InvalidCity
+2026-01-29 15:35:01 - [error-trace-123] - ERROR - [ERROR] HTTP exception: city=InvalidCity, status=404
+
+Command to debug:
+  grep "error-trace-123" weather-proxy.log | grep ERROR
+
+✅ Easy to find and debug errors with request ID!
+────────────────────────────────────────────────────────────────────────────────
+
+
+RETRY SCENARIO WITH TRACING:
+────────────────────────────────────────────────────────────────────────────────
+2026-01-29 15:40:00 - [retry-test-456] - INFO - [START] Weather request for city: Berlin
+2026-01-29 15:40:00 - [retry-test-456] - INFO - [CACHE MISS] City: Berlin, fetching from API
+2026-01-29 15:40:00 - [retry-test-456] - INFO - [FETCH] Starting API fetch for city: Berlin
+2026-01-29 15:40:00 - [retry-test-456] - INFO - [GEOCODE] Fetching coordinates for city: Berlin (attempt 1)
+2026-01-29 15:40:02 - [retry-test-456] - WARNING - [RETRY] Attempt 2 for city: Berlin
+2026-01-29 15:40:02 - [retry-test-456] - INFO - [GEOCODE] Fetching coordinates for city: Berlin (attempt 2)
+2026-01-29 15:40:03 - [retry-test-456] - INFO - [GEOCODE] Response received: status=200, attempt=2
+2026-01-29 15:40:03 - [retry-test-456] - INFO - [WEATHER API] Fetching data for Berlin (52.5200, 13.4050) (attempt 2)
+2026-01-29 15:40:04 - [retry-test-456] - INFO - [WEATHER API] Response received: status=200, attempt=2
+2026-01-29 15:40:04 - [retry-test-456] - INFO - [CACHE WRITE] Stored weather data for city: Berlin, TTL=600s
+2026-01-29 15:40:04 - [retry-test-456] - INFO - [SUCCESS] Fetch succeeded after 2 attempts for city: Berlin
+2026-01-29 15:40:04 - [retry-test-456] - INFO - [API SUCCESS] City: Berlin, duration=4125.34ms
+2026-01-29 15:40:04 - [retry-test-456] - INFO - [END] Request completed successfully (fresh data)
+
+✅ Clear visibility into retry behavior!
+────────────────────────────────────────────────────────────────────────────────
+
+================================================================================
+KEY IMPROVEMENTS:
+================================================================================
+
+1. ✅ UUID for every request - [a1b2c3d4-5678-90ab-cdef-1234567890ab]
+2. ✅ Semantic tags - [START], [CACHE HIT], [GEOCODE], [END], etc.
+3. ✅ Easy filtering - grep by request ID shows complete request trace
+4. ✅ Concurrent requests - Each has unique ID, no log mixing
+5. ✅ Error tracking - Errors include request ID for debugging
+6. ✅ Retry tracking - See which attempt succeeded
+7. ✅ Performance data - duration= in multiple log entries
+8. ✅ Cache behavior - Clear [CACHE HIT] vs [CACHE MISS] vs [CACHE WRITE]
+
+================================================================================
+USAGE:
+================================================================================
+
+# Find all logs for a specific request
+grep "[request-id]" weather-proxy.log
+
+# Find only errors for a request
+grep "[request-id]" weather-proxy.log | grep ERROR
+
+# Find timing information
+grep "[request-id]" weather-proxy.log | grep "duration="
+
+# Find cache operations
+grep "[request-id]" weather-proxy.log | grep "CACHE"
+
+# Find API calls
+grep "[request-id]" weather-proxy.log | grep "API"
+
+================================================================================
