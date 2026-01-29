@@ -51,41 +51,53 @@ class RequestIDFilter(logging.Filter):
 log_file = os.getenv("LOG_FILE", "weather-proxy.log")
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# Create logger
-logger = logging.getLogger(__name__)
-logger.setLevel(getattr(logging, log_level, logging.INFO))
 
-# Create formatters with request_id
-file_formatter = logging.Formatter(
-    '%(asctime)s - [%(request_id)s] - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-console_formatter = logging.Formatter(
-    '[%(request_id)s] - %(levelname)s - %(message)s'
-)
+def setup_logging():
+    """Setup logging configuration with request ID support"""
+    # Create logger
+    app_logger = logging.getLogger(__name__)
+    app_logger.setLevel(getattr(logging, log_level, logging.INFO))
+    
+    # Clear any existing handlers
+    app_logger.handlers.clear()
+    
+    # Create formatters with request_id
+    file_formatter = logging.Formatter(
+        '%(asctime)s - [%(request_id)s] - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_formatter = logging.Formatter(
+        '[%(request_id)s] - %(levelname)s - %(message)s'
+    )
+    
+    # File handler with rotation (10MB max, 5 backup files)
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(file_formatter)
+    file_handler.addFilter(RequestIDFilter())
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(console_formatter)
+    console_handler.addFilter(RequestIDFilter())
+    
+    # Add handlers to logger
+    app_logger.addHandler(file_handler)
+    app_logger.addHandler(console_handler)
+    
+    # Prevent duplicate logs
+    app_logger.propagate = False
+    
+    return app_logger
 
-# File handler with rotation (10MB max, 5 backup files)
-file_handler = RotatingFileHandler(
-    log_file,
-    maxBytes=10*1024*1024,  # 10MB
-    backupCount=5
-)
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(file_formatter)
-file_handler.addFilter(RequestIDFilter())
 
-# Console handler
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(console_formatter)
-console_handler.addFilter(RequestIDFilter())
-
-# Add handlers to logger
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
-
-# Prevent duplicate logs
-logger.propagate = False
+# Initialize logger
+logger = setup_logging()
 
 # Shutdown event for graceful shutdown
 shutdown_event = asyncio.Event()
@@ -123,7 +135,9 @@ async def lifespan(app: FastAPI):
     Lifespan context manager for graceful startup and shutdown.
     Handles resource initialization and cleanup.
     """
-    # Startup
+    # Startup - reinitialize logging to ensure our format is used
+    global logger
+    logger = setup_logging()
     logger.info("Application starting up...")
     
     # Setup signal handlers for graceful shutdown
